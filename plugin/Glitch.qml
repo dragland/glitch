@@ -120,17 +120,25 @@ Item {
   // ---- the mouse ------------------------------------------------------------
   // Like the original, the eye follows the pointer: offset (pct - 50) * 0.5 px,
   // and moving the mouse feeds activity energy (+0.05 per move). The overlay
-  // takes no input, so the cursor is polled from Hyprland while it's visible
-  // (10 Hz; the eye eases between readings). A Quickshell Socket on Hyprland's
-  // request socket only ever returned the first reading.
+  // takes no input, so the cursor is polled over Hyprland's request socket
+  // while the orb is visible (20 Hz, no process spawns).
   property real cursorPctX: 50
   property real cursorPctY: 50
   property double lastMouseMove: 0
 
-  Process {
-    id: cursorProc
-    command: ["hyprctl", "-j", "cursorpos"]
-    stdout: StdioCollector { onStreamFinished: root.readCursor(text) }
+  // One request per connection: Hyprland answers `j/cursorpos` and hangs up.
+  property string cursorBuf: ""
+  Socket {
+    id: hyprSock
+    path: Quickshell.env("XDG_RUNTIME_DIR") + "/hypr/" + Quickshell.env("HYPRLAND_INSTANCE_SIGNATURE") + "/.socket.sock"
+    onConnectedChanged: if (connected) { root.cursorBuf = ""; write("j/cursorpos"); flush() }
+    parser: SplitParser {
+      splitMarker: ""
+      onRead: data => {
+        root.cursorBuf += data
+        if (root.readCursor(root.cursorBuf)) hyprSock.connected = false
+      }
+    }
   }
 
   function readCursor(raw) {
@@ -150,10 +158,10 @@ Item {
   }
 
   Timer {
-    interval: 100
+    interval: 50
     repeat: true
     running: panel.visible
-    onTriggered: if (!cursorProc.running) cursorProc.running = true
+    onTriggered: if (!hyprSock.connected) hyprSock.connected = true
   }
 
   // Eye target: the pointer, unless the mouse has been idle for a while during
