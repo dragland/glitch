@@ -110,8 +110,8 @@ void main() {
 
     float inside = 1.0 - up(d, R - aa, R);
     if (inside > 0.0) {
-        // Body: bg @ 80% under the pattern.
-        vec4 body = over(patternColor(p, c, d), pm(bg, 0.8));
+        // Body: the palette bg under the pattern.
+        vec4 body = over(patternColor(p, c, d), pm(bg, 0.9)); // 0.8 + backdrop blur in the original
         // Inset box-shadow 0 0 40px color2 @ 25%.
         float edge = R - d;
         body = over(pm(secondary, 0.25 * exp(-0.5 * (edge * edge) / 400.0)), body);

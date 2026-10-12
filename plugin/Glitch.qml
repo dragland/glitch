@@ -120,7 +120,9 @@ Item {
   // ---- the mouse ------------------------------------------------------------
   // Like the original, the eye follows the pointer: offset (pct - 50) * 0.5 px,
   // and moving the mouse feeds activity energy (+0.05 per move). The overlay
-  // takes no input, so the cursor is polled from Hyprland while it's visible.
+  // takes no input, so the cursor is polled from Hyprland while it's visible
+  // (10 Hz; the eye eases between readings). A Quickshell Socket on Hyprland's
+  // request socket only ever returned the first reading.
   property real cursorPctX: 50
   property real cursorPctY: 50
   property double lastMouseMove: 0
@@ -148,7 +150,7 @@ Item {
   }
 
   Timer {
-    interval: 50
+    interval: 100
     repeat: true
     running: panel.visible
     onTriggered: if (!cursorProc.running) cursorProc.running = true
@@ -158,6 +160,7 @@ Item {
   // work, when the eye wanders (or scans while searching) on its own.
   property real wanderX: 0
   property real wanderY: 0
+  // wanderTick only forces re-evaluation: Date.now() isn't reactive.
   readonly property bool mouseIdle: Date.now() - lastMouseMove > 4000 && wanderTick >= 0
   property int wanderTick: 0
   Timer {
@@ -189,6 +192,17 @@ Item {
     }
   }
 
+  // Like the original's prefers-reduced-motion rule: with Hyprland animations
+  // off, the creature holds still (colours and size still change).
+  property bool reduceMotion: false
+  Process {
+    running: true
+    command: ["hyprctl", "-j", "getoption", "animations:enabled"]
+    stdout: StdioCollector {
+      onStreamFinished: { try { root.reduceMotion = JSON.parse(text).int === 0 } catch (e) {} }
+    }
+  }
+
   // ---- CSS keyframe motions ------------------------------------------------
   readonly property var motionDurations: ({ bounce: 1000, orbit: 4000, wobble: 2000, breathe: 4000, jitter: 200, still: 1000 })
   property real phase: 0
@@ -206,7 +220,7 @@ Item {
   function swing(t) { return 0.5 - 0.5 * Math.cos(2 * Math.PI * t) }
   readonly property var motionT: {
     var t = phase, s = swing(t), a = amp
-    switch (motion) {
+    switch (reduceMotion ? "still" : motion) {
     case "breathe": return { x: 0, y: 0, rot: 0, sx: 1 + 0.15 * s * a, sy: 1 + 0.15 * s * a }
     case "wobble": { var w = -1 + 2 * s; return { x: 0, y: 0, rot: 5 * w * a, sx: 1 + 0.05 * w * a, sy: 1 + 0.05 * w * a } }
     case "orbit": return { x: 20 * Math.cos(2 * Math.PI * t) * a, y: 20 * Math.sin(2 * Math.PI * t) * a, rot: 0, sx: 1, sy: 1 }
@@ -220,10 +234,17 @@ Item {
     }
   }
 
+  // Surprised: the pill's own animate-bounce (1 s), independent of the body.
+  property real pillPhase: 0
+  NumberAnimation on pillPhase {
+    from: 0; to: 1; loops: Animation.Infinite; duration: 1000
+    running: root.mood === "surprised" && panel.visible && !root.reduceMotion
+  }
+
   // Excited: animate-ping ring, 1 s loop (scale to 2x and fade by 75%).
   property real ping: 0
   SequentialAnimation on ping {
-    running: root.mood === "excited" && panel.visible
+    running: root.mood === "excited" && panel.visible && !root.reduceMotion
     loops: Animation.Infinite
     NumberAnimation { from: 0.001; to: 1; duration: 750; easing.type: Easing.OutCubic }
     PauseAnimation { duration: 250 }
@@ -233,7 +254,6 @@ Item {
     target: "glitch"
     function set(payloadJson: string): string { root.set(payloadJson); return "ok" }
     function hide(): string { root.shown = false; return "ok" }
-    function state(): string { return root.shown ? root.mode : "hidden" }
     function ping(): string { return "ok" }
   }
 
@@ -271,7 +291,7 @@ Item {
         // Centre the creature low in the window, leaving headroom for growth and bounce.
         width: parent.width
         height: parent.width
-        y: parent.height - 230 * root.k - height / 2
+        y: parent.height - 260 * root.k - height / 2
         transform: [
           Scale {
             origin.x: creature.width / 2; origin.y: creature.height / 2
@@ -316,7 +336,7 @@ Item {
           radius: width / 2
           color: Qt.rgba(1, 1, 1, 0.5)
           anchors.horizontalCenter: parent.horizontalCenter
-          y: parent.height / 2 - root.diameter * root.k / 2 - 32 * root.k - 40 * root.k * root.swing(root.phase)
+          y: parent.height / 2 - root.diameter * root.k / 2 - 32 * root.k - 40 * root.k * root.swing(root.pillPhase)
         }
       }
     }

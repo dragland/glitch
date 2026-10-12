@@ -7,8 +7,8 @@
 #   ./install.sh --no-mind       skip the local decision model (orb uses reactions.json)
 #   ./install.sh --no-voxtype    don't touch voxtype's config
 #
-# Nothing here needs sudo. Downloads (~1.9 GB with the mind) go to
-# ~/.local/share/glitch, pinned to the versions below.
+# Nothing here needs sudo. Downloads (~1.3 GB with the mind) go to
+# ~/.local/share/glitch, pinned and checksummed in this file.
 
 set -euo pipefail
 
@@ -19,10 +19,14 @@ PLUGIN_ID=dragland.glitch
 
 LLAMA_BUILD=b11552
 LLAMA_URL="https://github.com/ggml-org/llama.cpp/releases/download/$LLAMA_BUILD/llama-$LLAMA_BUILD-bin-ubuntu-vulkan-x64.tar.gz"
+LLAMA_SHA=c7bb933f3584b73296fbadea6e0d6273ddb7907699ec59ef08d0bb59e0a8b997
 MODEL=Qwen3-1.7B-Q4_K_M.gguf
-MODEL_URL="https://huggingface.co/unsloth/Qwen3-1.7B-GGUF/resolve/main/$MODEL"
+MODEL_URL="https://huggingface.co/unsloth/Qwen3-1.7B-GGUF/resolve/d7f544eead698dbd1f15126ef60b45a1e1933222/$MODEL"
+MODEL_SHA=b139949c5bd74937ad8ed8c8cf3d9ffb1e99c866c823204dc42c0d91fa181897
 VOICE=en_US-kristin-medium
-VOICE_URL="https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/kristin/medium/$VOICE"
+VOICE_URL="https://huggingface.co/rhasspy/piper-voices/resolve/c10ece1aade47bb51c153c893d14e5bf8e5b7117/en/en_US/kristin/medium/$VOICE"
+VOICE_SHA=5849957f929cbf720c258f8458692d6103fff2f0e3d3b19c8259474bb06a18d4
+VOICE_JSON_SHA=5681426d4aead22195de70531eeeeddb46493cfaffc5764b2ea3db73428b651c
 
 with_mind=1
 tweak_voxtype=1
@@ -30,7 +34,7 @@ for arg in "$@"; do
   case "$arg" in
   --no-mind) with_mind=0 ;;
   --no-voxtype) tweak_voxtype=0 ;;
-  -h | --help) sed -n '3,11p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  -h | --help) sed -n '3,8p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
   *) echo "Unknown option: $arg" >&2; exit 1 ;;
   esac
 done
@@ -50,11 +54,16 @@ link() {
   ok "${path/#$HOME/~} -> ${target/#$HOME/~}"
 }
 
+# Download $1 to $2 unless it's already there, and check its sha256 ($3).
 fetch() {
-  local url=$1 out=$2
-  [[ -s $out ]] && { ok "have ${out/#$HOME/~}"; return; }
-  ok "downloading $(basename "$out")"
-  curl -fL --progress-bar -o "$out.part" "$url" && mv "$out.part" "$out"
+  local url=$1 out=$2 sha=$3
+  if [[ ! -s $out ]]; then
+    ok "downloading $(basename "$out")"
+    curl -fL --progress-bar -o "$out.part" "$url"
+    mv "$out.part" "$out"
+  fi
+  echo "$sha  $out" | sha256sum -c --quiet - || die "checksum mismatch for $out (delete it and re-run)"
+  ok "have ${out/#$HOME/~}"
 }
 
 step "Checking requirements"
@@ -66,9 +75,8 @@ if ! command -v voxtype >/dev/null; then
   die "voxtype (dictation) isn't installed; run: omarchy-voxtype-install"
 fi
 agent=$(omarchy-default-agent 2>/dev/null || true)
-if [[ ${agent:-} != claude ]]; then
-  echo "    note: glitch drives Claude Code; your Omarchy default agent is '${agent:-unset}'."
-  echo "          Set it with: omarchy default agent claude"
+if [[ -n ${agent:-} && $agent != claude ]]; then
+  echo "    note: glitch drives Claude Code (your Omarchy default agent '$agent' has no glitch adapter yet)."
 fi
 command -v claude >/dev/null || echo "    note: claude isn't on PATH yet; install Claude Code before talking to glitch"
 if ! command -v uv >/dev/null; then
@@ -81,14 +89,15 @@ ok "ok"
 
 step "Python environment (Piper voice, beep synth, decision client)"
 mkdir -p "$DATA"
-# Exact versions from uv.lock, into glitch's own venv (uv fetches a Python if needed).
-UV_PROJECT_ENVIRONMENT="$DATA/venv" uv sync --frozen --quiet --project "$REPO"
+# Exact versions from uv.lock, on a uv-managed Python (.python-version) so an
+# Arch Python upgrade can't break the venv.
+UV_PROJECT_ENVIRONMENT="$DATA/venv" uv sync --locked --managed-python --quiet --project "$REPO"
 ok "synced from uv.lock"
 
 step "Voice"
 mkdir -p "$DATA/voices"
-fetch "$VOICE_URL.onnx" "$DATA/voices/$VOICE.onnx"
-fetch "$VOICE_URL.onnx.json" "$DATA/voices/$VOICE.onnx.json"
+fetch "$VOICE_URL.onnx" "$DATA/voices/$VOICE.onnx" "$VOICE_SHA"
+fetch "$VOICE_URL.onnx.json" "$DATA/voices/$VOICE.onnx.json" "$VOICE_JSON_SHA"
 
 if ((with_mind)); then
   step "Mind (llama.cpp $LLAMA_BUILD + $MODEL)"
@@ -96,6 +105,7 @@ if ((with_mind)); then
   if [[ ! -x $DATA/llama/llama-server || $(cat "$DATA/llama/BUILD" 2>/dev/null) != "$LLAMA_BUILD" ]]; then
     tmp=$(mktemp -d)
     curl -fL --progress-bar -o "$tmp/llama.tgz" "$LLAMA_URL"
+    echo "$LLAMA_SHA  $tmp/llama.tgz" | sha256sum -c --quiet - || die "checksum mismatch for the llama.cpp download"
     tar xzf "$tmp/llama.tgz" -C "$tmp"
     rm -rf "$DATA/llama"
     mv "$tmp/llama-$LLAMA_BUILD" "$DATA/llama"
@@ -103,7 +113,11 @@ if ((with_mind)); then
     rm -rf "$tmp"
   fi
   ok "have llama.cpp $LLAMA_BUILD"
-  fetch "$MODEL_URL" "$DATA/models/$MODEL"
+  fetch "$MODEL_URL" "$DATA/models/$MODEL" "$MODEL_SHA"
+  if [[ ! -s $DATA/mind.key ]]; then
+    (umask 077 && head -c 24 /dev/urandom | base64 | tr -d '/+=' >"$DATA/mind.key")
+    ok "created an API key for glitch-mind"
+  fi
 fi
 
 step "Linking code into place"
@@ -117,13 +131,15 @@ if [[ ! -f $CONFIG/glitch/glitch.conf ]]; then
 fi
 
 step "Orb shader"
-if [[ -x /usr/lib/qt6/bin/qsb ]]; then
-  /usr/lib/qt6/bin/qsb --qt6 -o "$REPO/plugin/glitch.frag.qsb" "$REPO/plugin/glitch.frag"
+# The compiled shader is committed (machines without qt6-shadertools use it);
+# rebuild only when the source is newer, so installs don't dirty the checkout.
+qsb_out="$REPO/plugin/glitch.frag.qsb"
+if [[ ! -s $qsb_out || $REPO/plugin/glitch.frag -nt $qsb_out ]]; then
+  [[ -x /usr/lib/qt6/bin/qsb ]] || die "glitch.frag changed but qsb isn't installed (pacman -S qt6-shadertools)"
+  /usr/lib/qt6/bin/qsb --qt6 -o "$qsb_out" "$REPO/plugin/glitch.frag"
   ok "compiled glitch.frag"
-elif [[ -s $REPO/plugin/glitch.frag.qsb ]]; then
-  ok "using the prebuilt glitch.frag.qsb (install qt6-shadertools to rebuild)"
 else
-  die "no glitch.frag.qsb and no qsb to build it (pacman -S qt6-shadertools)"
+  ok "glitch.frag.qsb is current"
 fi
 
 step "Keybindings"
@@ -138,7 +154,7 @@ if [[ -n $(hyprctl configerrors 2>/dev/null | tr -d '[:space:]') ]]; then
   hyprctl configerrors
   die "Hyprland reports config errors (see above)"
 fi
-ok "Super+D talk · Super+Alt+D talk in a new session · Super+Alt+Shift+D open session"
+ok "Super+D talk · Super+Alt+D talk in a new session · Super+Alt+Shift+D open session · Super+Alt+Backspace cancel"
 
 if ((with_mind)); then
   step "Mind service"
