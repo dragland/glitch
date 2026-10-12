@@ -33,7 +33,7 @@ mkdir -p "$RT"
 . "$GLITCH_HOME/config/glitch.conf"
 # shellcheck source=/dev/null
 [[ -f $USER_CONF/glitch.conf ]] && . "$USER_CONF/glitch.conf"
-export GLITCH_BEEP_VOLUME="${BEEP_VOLUME:-1.0}"
+export GLITCH_BEEP_VOLUME="${BEEP_VOLUME:-1.0}" MIND JEV_MODEL OPENAI_DECIDE_MODEL
 
 PY="$DATA/venv/bin/python"
 CUE="$GLITCH_HOME/libexec/cue"
@@ -234,8 +234,13 @@ stop_live() {
 
 adapter_claude() {
   local sid=${1:-} args
+  # Like typing into Claude: auto mode decides, and anything it would ask you
+  # about goes to `glitch _approve` (nothing else can answer in -p mode).
+  local hook
+  hook=$(jq -cn --arg cmd "$GLITCH_HOME/bin/glitch _approve" \
+    '{hooks: {PermissionRequest: [{matcher: "*", hooks: [{type: "command", command: $cmd, timeout: 75}]}]}}')
   args=(-p --output-format stream-json --verbose --include-partial-messages
-    --permission-mode auto --permission-prompts none
+    --permission-mode auto --permission-prompts none --settings "$hook"
     --append-system-prompt "$(voice_prompt)")
   [[ -n $sid ]] && args+=(--resume "$sid")
   # SIGINT ends a turn cleanly (SIGTERM leaves it unrecorded).
@@ -529,6 +534,41 @@ cmd_open() {
   fi
 }
 
+# PermissionRequest hook: ask through Omarchy's menu while the orb asks out
+# loud. Escape, a timeout or any failure denies.
+cmd_approve() {
+  local in label ask pick before
+  in=$(cat)
+  label=$(jq -r '.tool_name + ": " + ((.tool_input.command // .tool_input.file_path // .tool_input.url // .tool_input.description // (.tool_input | tostring)) | tostring | split("\n")[0] | .[0:110])' <<<"$in" 2>/dev/null)
+  case $(jq -r .tool_name <<<"$in" 2>/dev/null) in
+  Bash) ask="Need you: okay to run that command?" ;;
+  Edit | MultiEdit | Write | NotebookEdit) ask="Need you: okay to change that file?" ;;
+  WebFetch | WebSearch) ask="Need you: okay to go online for that?" ;;
+  *) ask="Need you: okay to do that?" ;;
+  esac
+  log "approve? $label"
+  before=$(cat "$RT/state.json" 2>/dev/null)
+  REACTION=$(reaction needs_you)
+  set_state needs_you "$label"
+  cue
+  (speech_warm && speech_render "$ask" && play "$RT/say.wav") </dev/null >/dev/null 2>&1 &
+  pick=$(timeout 60 omarchy-menu-select "glitch wants to · $label" "󰄬	Allow once" "󰅖	Deny" -- --width 760 2>/dev/null) || pick=""
+  [[ -z $pick ]] && omarchy-menu close >/dev/null 2>&1
+  hush
+  log "approve: ${pick:-no answer}"
+  if [[ -n $before ]]; then
+    REACTION=$(jq -c .reaction <<<"$before") set_state "$(jq -r .state <<<"$before")" "approved: ${pick:-none}"
+  fi
+  if [[ $pick == "Allow once" ]]; then
+    jq -cn '{hookSpecificOutput: {hookEventName: "PermissionRequest", decision: {behavior: "allow"}}}'
+  else
+    local why="The user didn't approve it."
+    [[ -n $pick ]] && why="The user chose Deny."
+    jq -cn --arg m "$why Don't retry it; say what you needed, starting the SAY line with Need you." \
+      '{hookSpecificOutput: {hookEventName: "PermissionRequest", decision: {behavior: "deny", message: $m}}}'
+  fi
+}
+
 cmd_cancel() {
   local pid
   if [[ -e $RT/recording ]]; then
@@ -556,6 +596,7 @@ stop) exec 8>"$RT/key.lock"; flock 8; cmd_stop ;; # the recording watchdog
 _turn) cmd_turn "$2" "${3:-false}" ;;
 _live) cmd_live ;;
 _expire) close_card ;;
+_approve) cmd_approve ;;
 open) cmd_open ;;
 new) forget_session; REACTION=$(reaction mood.calm) set_state done "fresh session" ;;
 cancel) cmd_cancel ;;
