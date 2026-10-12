@@ -9,14 +9,17 @@ Voices: chirp, blip, bubble, robot, chatter, whisper.
 """
 
 import json
+import math
 import os
 import random
 import subprocess
 import sys
 import tempfile
 import wave
+from array import array
 
-import numpy as np
+# Plain Python on purpose: a phrase is a few thousand samples, which synthesizes
+# in milliseconds, while importing numpy alone costs ~100 ms per beep.
 
 RATE = 48000
 MASTER = 0.4 * float(os.environ.get("GLITCH_BEEP_VOLUME", "1.0"))
@@ -25,36 +28,45 @@ MASTER = 0.4 * float(os.environ.get("GLITCH_BEEP_VOLUME", "1.0"))
 def exp_ramp(v0, v1, n):
     """Web Audio exponentialRampToValueAtTime over n samples."""
     if n <= 0:
-        return np.zeros(0)
-    return v0 * (v1 / v0) ** (np.arange(n) / n)
+        return []
+    k = (v1 / v0) ** (1 / n)
+    out, v = [], v0
+    for _ in range(n):
+        out.append(v)
+        v *= k
+    return out
 
 
 def lin_ramp(v0, v1, n):
-    return np.linspace(v0, v1, n, endpoint=False) if n > 0 else np.zeros(0)
+    return [v0 + (v1 - v0) * i / n for i in range(n)] if n > 0 else []
 
 
 def osc(kind, freq):
-    phase = np.cumsum(freq) / RATE  # cycles
-    frac = phase % 1.0
-    if kind == "square":
-        return np.where(frac < 0.5, 1.0, -1.0)
-    if kind == "sawtooth":
-        return 2.0 * frac - 1.0
-    if kind == "triangle":
-        return 1.0 - 4.0 * np.abs(frac - 0.5)
-    return np.sin(2 * np.pi * phase)
+    out, phase = [], 0.0  # phase in cycles
+    for f in freq:
+        frac = phase % 1.0
+        if kind == "square":
+            out.append(1.0 if frac < 0.5 else -1.0)
+        elif kind == "sawtooth":
+            out.append(2.0 * frac - 1.0)
+        elif kind == "triangle":
+            out.append(1.0 - 4.0 * abs(frac - 0.5))
+        else:
+            out.append(math.sin(2 * math.pi * phase))
+        phase += f / RATE
+    return out
 
 
 def one_pole(x, cutoff, high=False):
     """Time-varying one-pole filter (stands in for the BiquadFilterNode)."""
-    cutoff = np.broadcast_to(cutoff, x.shape)
-    a = np.exp(-2 * np.pi * cutoff / RATE)
-    y = np.empty_like(x)
-    s = 0.0
-    for i in range(len(x)):
-        s = (1 - a[i]) * x[i] + a[i] * s
-        y[i] = s
-    return x - y if high else y
+    if not isinstance(cutoff, list):
+        cutoff = [cutoff] * len(x)
+    y, s = [], 0.0
+    for xi, c in zip(x, cutoff):
+        a = math.exp(-2 * math.pi * c / RATE)
+        s = (1 - a) * xi + a * s
+        y.append(xi - s if high else s)
+    return y
 
 
 def syllable(voice, base, energy, mood):
@@ -103,26 +115,25 @@ def syllable(voice, base, energy, mood):
     total = int(RATE * (p + 0.05))
     n_p = int(RATE * p)
     if f_target:
-        freq = np.concatenate([exp_ramp(h, f_target, n_p), np.full(total - n_p, f_target)])
+        freq = exp_ramp(h, f_target, n_p) + [f_target] * (total - n_p)
     elif f_linear:
-        freq = np.concatenate([lin_ramp(h, f_linear, n_p), np.full(total - n_p, f_linear)])
+        freq = lin_ramp(h, f_linear, n_p) + [f_linear] * (total - n_p)
     else:
-        freq = np.full(total, h)
+        freq = [h] * total
 
     n_a = int(RATE * gain_attack)
-    gain = np.concatenate([
-        lin_ramp(0, gain_peak, n_a),
-        exp_ramp(gain_peak, 0.01, max(0, n_p - n_a)),
-        np.full(max(0, total - max(n_p, n_a)), 0.01),
-    ])[:total]
-    gain[-int(RATE * 0.005):] *= np.linspace(1, 0, int(RATE * 0.005))  # osc.stop()
+    gain = (lin_ramp(0, gain_peak, n_a) + exp_ramp(gain_peak, 0.01, max(0, n_p - n_a))
+            + [0.01] * max(0, total - max(n_p, n_a)))[:total]
+    n_stop = int(RATE * 0.005)  # osc.stop() click guard
+    for i in range(n_stop):
+        gain[total - n_stop + i] *= 1 - i / n_stop
 
     s = osc(kind, freq)
     if filt == "low":
-        s = one_pole(s, np.concatenate([exp_ramp(base * 3, base, n_p), np.full(total - n_p, base)]))
+        s = one_pole(s, exp_ramp(base * 3, base, n_p) + [base] * (total - n_p))
     elif filt == "high":
         s = one_pole(s, 2000.0, high=True)
-    return s * gain
+    return [a * b for a, b in zip(s, gain)]
 
 
 def phrase(r, beeps=None):
@@ -140,12 +151,13 @@ def phrase(r, beeps=None):
     if beeps:
         d = beeps
     step = 1 / max(2, rate)
-    out = np.zeros(int(RATE * (0.1 + d * step * 1.3 + 0.4)))
+    out = [0.0] * int(RATE * (0.1 + d * step * 1.3 + 0.4))
     t = 0.05
     for _ in range(d):
         s = syllable(voice, base, energy, mood)
         i = int(t * RATE)
-        out[i:i + len(s)] += s[:len(out) - i]
+        for j, v in enumerate(s[:len(out) - i]):
+            out[i + j] += v
         t += step + (random.random() - 0.5) * 0.5 * step
     end = min(len(out), int((t + 0.25) * RATE))
     return out[:end]
@@ -154,11 +166,7 @@ def phrase(r, beeps=None):
 def limiter(x):
     """DynamicsCompressor(-12 dB, ratio 12, soft knee), approximately."""
     thr = 10 ** (-12 / 20)
-    a = np.abs(x)
-    over = a > thr
-    y = x.copy()
-    y[over] = np.sign(x[over]) * (thr + (a[over] - thr) / 12)
-    return y
+    return [v if abs(v) <= thr else math.copysign(thr + (abs(v) - thr) / 12, v) for v in x]
 
 
 def main():
@@ -174,8 +182,8 @@ def main():
         r = json.loads(args[0])
     except json.JSONDecodeError:
         return 1
-    audio = limiter(phrase(r, beeps) * MASTER)
-    pcm = (np.clip(audio, -1, 1) * 32767).astype(np.int16)
+    audio = limiter([v * MASTER for v in phrase(r, beeps)])
+    pcm = array("h", (int(max(-1.0, min(1.0, v)) * 32767) for v in audio))
     with tempfile.NamedTemporaryFile(suffix=".wav", dir=os.environ.get("XDG_RUNTIME_DIR")) as f:
         with wave.open(f.name, "wb") as w:
             w.setnchannels(1)

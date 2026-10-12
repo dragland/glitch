@@ -15,15 +15,11 @@ name = "glitch"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
-    { name = "numpy" },
     { name = "piper-tts" },
 ]
 
 [package.metadata]
-requires-dist = [
-    { name = "numpy", specifier = "==2.5.4" },
-    { name = "piper-tts", specifier = "==1.8.0" },
-]
+requires-dist = [{ name = "piper-tts", specifier = "==1.8.0" }]
 
 [[package]]
 name = "numpy"
