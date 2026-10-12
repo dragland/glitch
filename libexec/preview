@@ -1,0 +1,22 @@
+#!/bin/bash
+# Cycle candidate glitch orb styles on screen so you can pick one by eye.
+#   preview [seconds-each]
+each=${1:-5}
+opts=(
+  "1 sonar|ocean|rings|breathe"
+  "2 ghost|mono|rings|breathe"
+  "3 creature|electric|rings|orbit"
+  "4 tide|ocean|waves|orbit"
+  "5 pastel rings|candy|rings|breathe"
+  "6 ember|sunset|rings|breathe"
+  "7 drift|electric|waves|wobble"
+  "8 pebble|mono|dots|breathe"
+)
+id=0
+for o in "${opts[@]}"; do
+  IFS='|' read -r label pal pat mot <<<"$o"
+  omarchy-shell -q glitch set "{\"state\":\"thinking\",\"reaction\":{\"palette\":\"$pal\",\"pattern\":\"$pat\",\"motion\":\"$mot\",\"mood\":\"focused\",\"energy\":0.35}}" >/dev/null
+  id=$(omarchy-notification-send --app-name glitch-preview -u low -t $((each * 1000)) -p -r "$id" "Thinking style $label" "$pal · $pat · $mot" 2>/dev/null || echo 0)
+  sleep "$each"
+done
+omarchy-shell -q glitch hide >/dev/null

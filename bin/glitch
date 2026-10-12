@@ -1,0 +1,465 @@
+#!/bin/bash
+
+# glitch: tap a key, speak, tap again, and your default coding agent does it,
+# while an expressive orb (a port of Yohei Nakajima's Beep Jev) shows how it's
+# going, beeps its mood, and speaks a short answer.
+#
+#   glitch toggle [--new]  start recording, or stop and send (Super+D / Super+Alt+D)
+#   glitch start [--new]   begin recording (for hold-to-talk bindings)
+#   glitch stop            transcribe and send to the agent
+#   glitch open            open the current session in a terminal
+#   glitch new             forget the current session
+#   glitch cancel          stop the running agent turn
+#   glitch hush            stop speaking
+#   glitch say <text>      speak text with glitch's voice
+#   glitch state           print the current orb state
+#
+# Layout (see README.md):
+#   code       this repo, symlinked into place by install.sh
+#   defaults   <repo>/config/{glitch.conf,voice-prompt.md,reactions.json}
+#   overrides  ~/.config/glitch/ (same names; glitch.conf is sourced after the default)
+#   data       ~/.local/share/glitch/ (venv, voices, models, llama.cpp)
+#   runtime    $XDG_RUNTIME_DIR/glitch/ (state.json, sid, history, glitch.log)
+
+set -uo pipefail
+
+GLITCH_HOME=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
+DATA="${XDG_DATA_HOME:-$HOME/.local/share}/glitch"
+USER_CONF="${XDG_CONFIG_HOME:-$HOME/.config}/glitch"
+RT="${XDG_RUNTIME_DIR:-/run/user/$UID}/glitch"
+mkdir -p "$RT"
+
+# Settings: the repo's defaults, then the user's overrides.
+# shellcheck source=../config/glitch.conf
+. "$GLITCH_HOME/config/glitch.conf"
+# shellcheck source=/dev/null
+[[ -f $USER_CONF/glitch.conf ]] && . "$USER_CONF/glitch.conf"
+export GLITCH_BEEP_VOLUME="${BEEP_VOLUME:-1.0}"
+
+# A user copy of a config file wins over the repo default.
+conf_file() {
+  if [[ -f $USER_CONF/$1 ]]; then echo "$USER_CONF/$1"; else echo "$GLITCH_HOME/config/$1"; fi
+}
+
+PY="$DATA/venv/bin/python"
+PIPER="$DATA/venv/bin/piper"
+CUE="$GLITCH_HOME/libexec/cue"
+DECIDE="$GLITCH_HOME/libexec/decide"
+
+# Keep the log short; it lives in tmpfs.
+if [[ -f $RT/glitch.log ]] && (($(wc -l <"$RT/glitch.log") > 2000)); then
+  tail -n 1000 "$RT/glitch.log" >"$RT/glitch.log.tmp" && mv "$RT/glitch.log.tmp" "$RT/glitch.log"
+fi
+
+log() { printf '%s %s\n' "$(date +%T)" "$*" >>"$RT/glitch.log"; }
+
+# Write the orb state and poke the shell so the orb updates instantly.
+set_state() {
+  local state=$1 detail=${2:-} json
+  json=$(jq -cn --arg s "$state" --arg d "$detail" --arg sid "$(cat "$RT/sid" 2>/dev/null)" \
+    --argjson new "${NEW_SESSION:-false}" --argjson reaction "${REACTION:-null}" \
+    '{state:$s, detail:$d, reaction:$reaction, session:$sid, new:$new, ts:now|floor}')
+  printf '%s\n' "$json" >"$RT/state.json"
+  log "state $state $detail"
+  omarchy-shell -q glitch set "$json" >/dev/null 2>&1 || true
+}
+
+current_sid() {
+  local f="$RT/sid"
+  [[ -s $f ]] || return 1
+  (($(date +%s) - $(stat -c %Y "$f") < RESUME_WINDOW)) || return 1
+  cat "$f"
+}
+
+# One sticky card that each turn replaces: critical is the only urgency the
+# Omarchy shell keeps on screen until dismissed. Click opens the session.
+notify() {
+  local id
+  close_card # the shell keeps replaced cards on screen, so take the old one down
+  id=$(omarchy-notification-send --app-name glitch -g "󰍬" -u critical -p "$@" 2>/dev/null) || return 0
+  [[ $id =~ ^[0-9]+$ ]] && printf '%s' "$id" >"$RT/notify.id"
+  printf '%s' "$1" >"$RT/notify.summary"
+}
+
+# Beep Jev style reaction for a state or mood, from reactions.json.
+#   reaction listening | reaction tool.look | reaction mood.happy
+reaction() {
+  jq -c --arg k "$1" 'getpath($k | split(".")) // .mood.calm' "$(conf_file reactions.json)" 2>/dev/null || echo null
+}
+
+# Beep phrase for the current reaction (see libexec/cue). Fire and
+# forget; pass --beeps N for a short tick instead of a full phrase.
+cue() {
+  [[ $BEEPS == 1 && -x $PY && ${REACTION:-null} != null ]] || return 0
+  setsid "$PY" -I "$CUE" "$@" "$REACTION" </dev/null >/dev/null 2>>"$RT/glitch.log" 8>&- 9>&- &
+}
+
+# Render text to speech in a file (run in the background while other work
+# happens), then play it; playback is interruptible with `glitch hush`.
+synth() {
+  rm -f "$2"
+  [[ $SPEAK == 1 && -x $PIPER && -f $VOICE && -n $1 ]] || return 0
+  printf '%s' "$1" | "$PIPER" -m "$VOICE" -f "$2" 2>/dev/null
+}
+
+play() {
+  [[ -s $1 ]] || return 0
+  pw-play "$1" 2>/dev/null &
+  echo $! >"$RT/speak.pid"
+  wait $! 2>/dev/null
+  rm -f "$RT/speak.pid"
+}
+
+speak() {
+  synth "$1" "$RT/say.wav"
+  play "$RT/say.wav"
+}
+
+# The reply card stands for the live session: it closes when the resume window
+# runs out or a new session starts.
+close_card() {
+  local summary
+  summary=$(cat "$RT/notify.summary" 2>/dev/null) || return 0
+  # The Omarchy shell ignores CloseNotification for its on-screen cards; its own
+  # IPC dismisses by summary.
+  [[ -n $summary ]] && omarchy-shell -q notifications dismiss "$summary" >/dev/null 2>&1
+  rm -f "$RT/notify.id" "$RT/notify.summary"
+}
+
+expire_later() {
+  local mt
+  mt=$(stat -c %Y "$RT/sid" 2>/dev/null) || return 0
+  setsid bash -c "sleep $((RESUME_WINDOW + 2)); [[ \$(stat -c %Y '$RT/sid' 2>/dev/null) == $mt ]] && exec '$0' _expire" \
+    </dev/null >/dev/null 2>&1 8>&- 9>&- &
+}
+
+# --- live reactions (the local decision model, see libexec/decide) ---
+
+# The last HISTORY_TURNS turns of this session, for continuity between reactions.
+recent_history() {
+  if ((HISTORY_TURNS > 0)) && [[ -s $RT/history.jsonl ]]; then
+    tail -n "$HISTORY_TURNS" "$RT/history.jsonl" | jq -cs .
+  else
+    echo '[]'
+  fi
+}
+
+# Queue a decision about what's happening right now; the newest request wins
+# and a single worker keeps at most one in flight.
+live_decide() {
+  [[ -x $PY ]] || return 0
+  jq -cn --arg user "$1" --arg activity "$2" --arg words "$3" --argjson history "$(recent_history)" \
+    --argjson speech "$(cat "$RT/speech.json" 2>/dev/null || echo null)" \
+    '{phase:"working", user:$user, activity:$activity, words:$words, history:$history, speech:$speech, timeout:4}' >"$RT/live.in.tmp" &&
+    mv "$RT/live.in.tmp" "$RT/live.in"
+  setsid "$0" _live </dev/null >/dev/null 2>>"$RT/glitch.log" 8>&- 9>&- &
+}
+
+cmd_live() {
+  local r st
+  exec 7>"$RT/live.lock"
+  flock -n 7 || return 0
+  echo $$ >"$RT/live.pid"
+  while mv "$RT/live.in" "$RT/live.cur" 2>/dev/null; do
+    r=$("$PY" -I "$DECIDE" <"$RT/live.cur" | jq -c 'del(.probs)') || continue
+    [[ -n $r && -e $RT/turn.pid ]] || continue
+    st=$(jq -r .state "$RT/state.json" 2>/dev/null)
+    [[ $st == thinking || $st == tool ]] || continue
+    printf '%s' "$r" >"$RT/live.json"
+    log "live $r"
+    omarchy-shell -q glitch set "$(jq -c --argjson r "$r" '.reaction = $r' "$RT/state.json")" >/dev/null 2>&1
+  done
+}
+
+hush() {
+  local pid
+  pid=$(cat "$RT/speak.pid" 2>/dev/null) || return 0
+  kill "$pid" 2>/dev/null
+  rm -f "$RT/speak.pid"
+}
+
+# --- agent adapters ---------------------------------------------------------
+# Each adapter reads the prompt on stdin, takes an optional session id, and
+# emits normalized lines: "sid <id>", "tool <category>\t<label>",
+# "say <text>", "mood <word>", "result <json string>", "error <text>",
+# "denied <n>", "words <json string>" (streamed text). Tool categories: look,
+# make, run, delegate.
+
+adapter_claude() {
+  local sid=${1:-} args
+  args=(-p --output-format stream-json --verbose --include-partial-messages --permission-mode auto
+    --append-system-prompt "$(cat "$(conf_file voice-prompt.md)" 2>/dev/null)")
+  [[ -n $sid ]] && args+=(--resume "$sid")
+  claude "${args[@]}" 2>>"$RT/glitch.log" | jq --unbuffered -r '
+    def clip(n): if length > n then .[0:n] + "…" else . end;
+    def tlabel: .name + (
+      (.input.file_path // .input.path // .input.command // .input.pattern // .input.url // .input.description // "")
+      | tostring | split("\n")[0] | sub("^/home/[^/]+/"; "~/") | if . == "" then "" else ": " + clip(48) end);
+    def tcat: .name as $n |
+      if ($n | test("^(Read|Glob|Grep|LS|WebFetch|WebSearch|ToolSearch)$")) then "look"
+      elif ($n | test("^(Edit|MultiEdit|Write|NotebookEdit)$")) then "make"
+      elif ($n | test("^(Task|Agent)$")) then "delegate"
+      else "run" end;
+    def tagline(k): [.[] | select(test("^\\s*" + k + ":"))] | last // "" | sub("^\\s*" + k + ":\\s*"; "");
+    if .type == "stream_event" then
+      (.event.delta // {} | (.text // .thinking // empty) | "words \(tojson)")
+    elif .type == "system" and .subtype == "init" then "sid \(.session_id)"
+    elif .type == "assistant" then (.message.content[]? | select(.type == "tool_use") | "tool \(tcat)\t\(tlabel)")
+    elif .type == "result" then
+      "sid \(.session_id)",
+      (if (.permission_denials // [] | length) > 0 then "denied \(.permission_denials | length)" else empty end),
+      (if .is_error then "error \(.result // .subtype | tostring | gsub("\n"; " "))"
+       else (.result // "" | split("\n")) as $ls |
+         "mood \($ls | tagline("MOOD") | ascii_downcase | gsub("[^a-z]"; ""))",
+         "say \($ls | tagline("SAY") | gsub("\n"; " "))",
+         "result \([$ls[] | select(test("^\\s*(SAY|MOOD):") | not)] | join("\n") | sub("\\s+$"; "") | tojson)"
+       end)
+    else empty end'
+}
+
+run_agent() {
+  local agent=$1 sid=$2
+  case "$agent" in
+  claude) adapter_claude "$sid" ;;
+  *) echo "error $agent isn't supported by glitch yet (only claude)" ;;
+  esac
+}
+
+# --- commands ---------------------------------------------------------------
+
+# Tap to start, tap again to send. Every key press funnels through here under a
+# lock, so a press that lands while the last one is still transcribing is
+# dropped instead of desyncing the orb from voxtype.
+cmd_toggle() {
+  local now last
+  exec 8>"$RT/key.lock"
+  if ! flock -n 8; then
+    log "key ignored: busy"
+    return
+  fi
+  now=$(date +%s%N)
+  last=$(cat "$RT/last-key" 2>/dev/null || echo 0)
+  printf '%s' "$now" >"$RT/last-key"
+  if ((now - last < 300000000)); then
+    log "key ignored: bounce"
+    return
+  fi
+  hush
+  if [[ -e $RT/recording ]]; then
+    cmd_stop
+  else
+    cmd_start "$@"
+  fi
+}
+
+cmd_start() {
+  local stamp
+  [[ ${1:-} == --new ]] && touch "$RT/force-new"
+  stamp=$(date +%s%N)
+  printf '%s' "$stamp" >"$RT/recording"
+  voxtype record start --file="$RT/utterance.txt" --no-osd 2>>"$RT/glitch.log"
+  REACTION=$(reaction listening)
+  set_state listening
+  cue --beeps 1
+  # Watchdog: a forgotten recording sends itself after 590 s (voxtype caps at 600).
+  setsid bash -c "sleep 590; [[ \$(cat '$RT/recording' 2>/dev/null) == $stamp ]] && exec '$0' stop" </dev/null >/dev/null 2>&1 8>&- &
+}
+
+cmd_stop() {
+  local out rc text started bare
+  mv "$RT/recording" "$RT/recording.$$" 2>/dev/null || return 0
+  started=$(cat "$RT/recording.$$")
+  rm -f "$RT/recording.$$"
+  # Start and stop within 0.4 s is a slip, not a request.
+  if (($(date +%s%N) - started < 400000000)); then
+    voxtype record cancel >/dev/null 2>&1
+    rm -f "$RT/force-new"
+    set_state idle ""
+    return
+  fi
+  REACTION=$(reaction listening)
+  set_state transcribing
+  cue --beeps 2
+  out=$(voxtype record stop --wait --json --wait-file "$RT/utterance.txt" --timeout 30 2>>"$RT/glitch.log")
+  rc=$?
+  text=$(tr '\n' ' ' 2>/dev/null <"$RT/utterance.txt" | sed 's/^ *//;s/ *$//')
+  rm -f "$RT/utterance.txt"
+  log "stop rc=$rc out=$out text=$text"
+  # How long and how fast you talked: the voice version of Beep Jev's typing speed.
+  jq -cn --arg secs "$(( ($(date +%s%N) - started) / 1000000 ))" --arg words "$(wc -w <<<"$text")" \
+    '($secs | tonumber / 1000) as $s | {seconds: ($s * 10 | round / 10), wps: (if $s > 0 then ($words | tonumber) / $s * 10 | round / 10 else 0 end)}' \
+    >"$RT/speech.json" 2>/dev/null
+  # Whisper invents these from silence.
+  bare=$(tr -d '[:punct:]' <<<"${text,,}" | sed 's/^ *//;s/ *$//')
+  case "$bare" in
+  you | "thank you" | "thanks for watching" | "blank_audio" | "blank audio" | bye | music) text="" ;;
+  esac
+  if ((rc != 0)) || [[ -z $text ]]; then
+    rm -f "$RT/force-new"
+    set_state idle "didn't catch that"
+    return
+  fi
+
+  # "new task, ..." / "new chat" starts fresh; the rest of the sentence is the prompt.
+  shopt -s nocasematch
+  if [[ $text =~ ^(start\ a\ )?new\ (task|chat|session|conversation)[[:punct:]]*\ *(.*)$ ]]; then
+    touch "$RT/force-new"
+    text=${BASH_REMATCH[3]}
+  fi
+  shopt -u nocasematch
+  if [[ -e $RT/force-new ]]; then
+    rm -f "$RT/force-new" "$RT/sid" "$RT/history.jsonl"
+    close_card
+    NEW_SESSION=true
+  fi
+  if [[ -z $text ]]; then
+    set_state done "Fresh session. What's next?"
+    return
+  fi
+
+  # Run the turn detached so the key release returns immediately.
+  NEW_SESSION=${NEW_SESSION:-false} setsid "$0" _turn "$text" </dev/null >/dev/null 2>&1 8>&- &
+}
+
+cmd_turn() {
+  local text=$1 sid agent kind rest result="" say="" mood="" denied=0 failed="" body
+  local words="" activity="" last_decide=0 now fin
+  exec 9>"$RT/turn.lock"
+  if ! flock -n 9; then
+    set_state thinking "waiting for the last request…"
+    flock 9
+  fi
+  echo $$ >"$RT/turn.pid"
+
+  agent=$(omarchy-default-agent 2>/dev/null)
+  agent=${agent:-claude}
+  sid=$(current_sid) || { sid=""; NEW_SESSION=true; }
+  log "turn agent=$agent sid=${sid:-new} text=$text"
+  rm -f "$RT/live.json" "$RT/live.in"
+  REACTION=$(reaction thinking)
+  set_state thinking "$text"
+  live_decide "$text" "" ""
+
+  cd "$WORKDIR" 2>/dev/null || cd "$HOME"
+  while IFS= read -r line; do
+    kind=${line%% *}
+    rest=${line#* }
+    case "$kind" in
+    sid) [[ -n $rest && $rest != null ]] && printf '%s' "$rest" >"$RT/sid" ;;
+    tool)
+      activity=${rest#*$'\t'}
+      # Instant feedback from the table (or the last live decision), then let
+      # the model refine it.
+      REACTION=$(cat "$RT/live.json" 2>/dev/null || reaction "tool.${rest%%$'\t'*}")
+      set_state tool "$activity"
+      cue --beeps 1
+      live_decide "$text" "$activity" "$words"
+      last_decide=$(date +%s)
+      ;;
+    words)
+      words+=$(jq -r . <<<"$rest" 2>/dev/null)
+      words=${words: -600}
+      now=$(date +%s)
+      if ((now - last_decide >= 3)); then
+        live_decide "$text" "$activity" "$words"
+        last_decide=$now
+      fi
+      ;;
+    denied) denied=$rest ;;
+    mood) mood=$rest ;;
+    say) say=$rest ;;
+    result) result=$(jq -r . <<<"$rest" 2>/dev/null || printf '%s' "$rest") ;;
+    error) failed=$rest ;;
+    esac
+  done < <(printf '%s' "$text" | run_agent "$agent" "$sid")
+
+  rm -f "$RT/turn.pid"
+  touch "$RT/sid" 2>/dev/null # resume window counts from the end of the turn
+  # No SAY line (agent ignored the convention): fall back to the first sentence.
+  if [[ -z $say ]]; then
+    say=$(head -c 400 <<<"$result" | tr '\n' ' ' | sed -E 's/([.!?]) .*/\1/' | cut -c1-160)
+  fi
+  mood=${mood:-calm}
+  log "done denied=$denied failed=$failed mood=$mood say=$say result=$(tr '\n' ' ' <<<"$result")"
+  body=$(head -c 900 <<<"$result")
+
+  # Live decisions are moot now; free the model for the final one.
+  rm -f "$RT/live.in"
+  pkill -TERM -P "$(cat "$RT/live.pid" 2>/dev/null || echo 0)" 2>/dev/null
+  # Decide the final reaction while the voice renders; both take ~1.5 s.
+  [[ -n $failed ]] && say="Sorry, something went wrong."
+  synth "$say" "$RT/say.wav" &
+  fin=""
+  if [[ -x $PY ]]; then
+    fin=$(jq -cn --arg user "$text" --arg say "$say" --arg reply "$body" --arg mood "$mood" \
+      --argjson failed "$([[ -n $failed ]] && echo true || echo false)" --argjson history "$(recent_history)" \
+      --argjson speech "$(cat "$RT/speech.json" 2>/dev/null || echo null)" \
+      '{phase:"done", user:$user, say:$say, reply:$reply, mood:$mood, failed:$failed, history:$history, speech:$speech, timeout:3}' |
+      "$PY" -I "$DECIDE" | jq -c 'del(.probs)' 2>/dev/null)
+  fi
+  wait
+  log "final ${fin:-table}"
+  jq -cn --arg user "$text" --arg say "$say" --argjson reaction "${fin:-$(reaction "mood.$mood")}" \
+    '{user:$user, say:$say, reaction:($reaction | {mood, palette, pattern, motion})}' >>"$RT/history.jsonl" 2>/dev/null
+  tail -n 20 "$RT/history.jsonl" >"$RT/history.tmp" 2>/dev/null && mv "$RT/history.tmp" "$RT/history.jsonl"
+
+  if [[ -n $failed ]]; then
+    REACTION=${fin:-$(reaction error)}
+    set_state error "$failed"
+    cue
+    notify "Something went wrong" "$failed" --exec "$0" open
+    play "$RT/say.wav"
+  elif ((denied > 0)); then
+    REACTION=$(reaction needs_you) # keep needs-you unmistakable
+    set_state needs_you "$say"
+    cue
+    notify "${say:-Need you}" "$body" --exec "$0" open
+    play "$RT/say.wav"
+  else
+    REACTION=${fin:-$(reaction "mood.$mood")}
+    set_state speaking "$say"
+    cue
+    sleep 0.6 # let the beeps lead into the voice
+    notify "${say:-Done}" "$body" --exec "$0" open
+    play "$RT/say.wav"
+    set_state done "$say"
+  fi
+  expire_later
+}
+
+cmd_open() {
+  local sid
+  sid=$(cat "$RT/sid" 2>/dev/null)
+  cd "$WORKDIR" 2>/dev/null || cd "$HOME"
+  if [[ -n $sid ]]; then
+    exec omarchy-launch-tui --app-id=org.omarchy.agent claude --resume "$sid"
+  else
+    exec omarchy-agent
+  fi
+}
+
+cmd_cancel() {
+  local pid
+  pid=$(cat "$RT/turn.pid" 2>/dev/null) || true
+  [[ -n $pid ]] && pkill -TERM -s "$(ps -o sid= -p "$pid" | tr -d ' ')" 2>/dev/null
+  voxtype record cancel >/dev/null 2>&1
+  hush
+  rm -f "$RT/turn.pid" "$RT/force-new" "$RT/recording"
+  set_state idle "cancelled"
+}
+
+case "${1:-}" in
+toggle) shift; cmd_toggle "$@" ;;
+start) shift; [[ -e $RT/recording ]] || cmd_start "$@" ;;
+stop) exec 8>"$RT/key.lock"; flock 8; cmd_stop ;;
+_turn) cmd_turn "$2" ;;
+open) cmd_open ;;
+new) rm -f "$RT/sid" "$RT/history.jsonl"; close_card; NEW_SESSION=true set_state done "Fresh session" ;;
+_expire) close_card ;;
+_live) cmd_live ;;
+cancel) cmd_cancel ;;
+hush) hush ;;
+say) shift; speak "$*" ;;
+state) cat "$RT/state.json" 2>/dev/null ;;
+*) sed -n '3,15p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+esac
