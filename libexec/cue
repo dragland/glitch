@@ -1,0 +1,190 @@
+#!/usr/bin/env python3
+"""Beep phrases for glitch: a port of Beep Jev's Web Audio synth
+(beepjev.replit.app, functions zc/ZA in its bundle).
+
+    cue '<reaction json>'   e.g. '{"voice":"chirp","basePitch":440,"beepRate":5,"energy":0.5,"mood":"curious"}'
+    cue --beeps N '<json>'  force the number of syllables (1 = a single tick)
+
+Voices: chirp, blip, bubble, robot, chatter, whisper.
+"""
+
+import json
+import os
+import random
+import subprocess
+import sys
+import tempfile
+import wave
+
+import numpy as np
+
+RATE = 48000
+MASTER = 0.4 * float(os.environ.get("GLITCH_BEEP_VOLUME", "1.0"))
+
+
+def exp_ramp(v0, v1, n):
+    """Web Audio exponentialRampToValueAtTime over n samples."""
+    if n <= 0:
+        return np.zeros(0)
+    return v0 * (v1 / v0) ** (np.arange(n) / n)
+
+
+def lin_ramp(v0, v1, n):
+    return np.linspace(v0, v1, n, endpoint=False) if n > 0 else np.zeros(0)
+
+
+def osc(kind, freq):
+    phase = np.cumsum(freq) / RATE  # cycles
+    frac = phase % 1.0
+    if kind == "square":
+        return np.where(frac < 0.5, 1.0, -1.0)
+    if kind == "sawtooth":
+        return 2.0 * frac - 1.0
+    if kind == "triangle":
+        return 1.0 - 4.0 * np.abs(frac - 0.5)
+    return np.sin(2 * np.pi * phase)
+
+
+def one_pole(x, cutoff, high=False):
+    """Time-varying one-pole filter (stands in for the BiquadFilterNode)."""
+    cutoff = np.broadcast_to(cutoff, x.shape)
+    a = np.exp(-2 * np.pi * cutoff / RATE)
+    y = np.empty_like(x)
+    s = 0.0
+    for i in range(len(x)):
+        s = (1 - a[i]) * x[i] + a[i] * s
+        y[i] = s
+    return x - y if high else y
+
+
+def syllable(voice, base, energy, mood):
+    """ZA(): one beep. Returns samples (already includes the trailing 50 ms)."""
+    h = base * (0.8 + random.random() * 0.4)
+    if voice == "robot":
+        h = base
+    if mood == "surprised" and random.random() > 0.5:
+        h *= 1.5
+    if mood == "curious" and random.random() > 0.5:
+        h *= 1.2
+    p = 0.1 + energy * 0.1
+    if mood == "calm":
+        p *= 1.5
+    if mood == "excited":
+        p *= 0.6
+    x = 0.3 + energy * 0.3
+    kind = "sine"
+    f_target = None   # exponential frequency ramp target
+    f_linear = None   # linear frequency ramp target
+    gain_peak, gain_attack = x, 0.02
+    filt = None
+
+    if voice == "chirp":
+        f_target = h * 1.5
+    elif voice == "blip":
+        kind, p = "square", 0.05 + energy * 0.05
+        gain_peak, gain_attack = x * 0.5, 0.01
+    elif voice == "bubble":
+        f_target = h * 0.5
+    elif voice == "robot":
+        kind, p = "sawtooth", 0.1
+        gain_peak, gain_attack = x * 0.4, 0.01
+        filt = "low"
+    elif voice == "chatter":
+        kind, p = "triangle", 0.08 + random.random() * 0.05
+        h *= 1.2 if random.random() > 0.5 else 0.8
+        filt = "low"
+    elif voice == "whisper":
+        kind = "triangle"
+        h *= 2
+        f_linear = h * 0.8
+        gain_peak, gain_attack = x * 0.2, 0.05
+        filt = "high"
+
+    total = int(RATE * (p + 0.05))
+    n_p = int(RATE * p)
+    if f_target:
+        freq = np.concatenate([exp_ramp(h, f_target, n_p), np.full(total - n_p, f_target)])
+    elif f_linear:
+        freq = np.concatenate([lin_ramp(h, f_linear, n_p), np.full(total - n_p, f_linear)])
+    else:
+        freq = np.full(total, h)
+
+    n_a = int(RATE * gain_attack)
+    gain = np.concatenate([
+        lin_ramp(0, gain_peak, n_a),
+        exp_ramp(gain_peak, 0.01, max(0, n_p - n_a)),
+        np.full(max(0, total - max(n_p, n_a)), 0.01),
+    ])[:total]
+    gain[-int(RATE * 0.005):] *= np.linspace(1, 0, int(RATE * 0.005))  # osc.stop()
+
+    s = osc(kind, freq)
+    if filt == "low":
+        s = one_pole(s, np.concatenate([exp_ramp(base * 3, base, n_p), np.full(total - n_p, base)]))
+    elif filt == "high":
+        s = one_pole(s, 2000.0, high=True)
+    return s * gain
+
+
+def phrase(r, beeps=None):
+    """zc(): a phrase of syllables spaced at the beep rate."""
+    voice = r.get("voice", "chirp")
+    base = float(r.get("basePitch", 440))
+    rate = float(r.get("beepRate", 5))
+    energy = float(r.get("energy", 0.5))
+    mood = r.get("mood", "")
+    d = 1 + int(energy * 4) + random.randint(0, 1)
+    if mood == "excited":
+        d += 2
+    if mood == "calm":
+        d = max(1, d - 1)
+    if beeps:
+        d = beeps
+    step = 1 / max(2, rate)
+    out = np.zeros(int(RATE * (0.1 + d * step * 1.3 + 0.4)))
+    t = 0.05
+    for _ in range(d):
+        s = syllable(voice, base, energy, mood)
+        i = int(t * RATE)
+        out[i:i + len(s)] += s[:len(out) - i]
+        t += step + (random.random() - 0.5) * 0.5 * step
+    end = min(len(out), int((t + 0.25) * RATE))
+    return out[:end]
+
+
+def limiter(x):
+    """DynamicsCompressor(-12 dB, ratio 12, soft knee), approximately."""
+    thr = 10 ** (-12 / 20)
+    a = np.abs(x)
+    over = a > thr
+    y = x.copy()
+    y[over] = np.sign(x[over]) * (thr + (a[over] - thr) / 12)
+    return y
+
+
+def main():
+    args = sys.argv[1:]
+    beeps = None
+    if args[:1] == ["--beeps"]:
+        beeps = int(args[1])
+        args = args[2:]
+    if not args:
+        print(__doc__)
+        return 1
+    try:
+        r = json.loads(args[0])
+    except json.JSONDecodeError:
+        return 1
+    audio = limiter(phrase(r, beeps) * MASTER)
+    pcm = (np.clip(audio, -1, 1) * 32767).astype(np.int16)
+    with tempfile.NamedTemporaryFile(suffix=".wav", dir=os.environ.get("XDG_RUNTIME_DIR")) as f:
+        with wave.open(f.name, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(RATE)
+            w.writeframes(pcm.tobytes())
+        subprocess.run(["pw-play", f.name], check=False)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

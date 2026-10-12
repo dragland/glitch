@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "id": "dragland.glitch",
+  "name": "Glitch",
+  "version": "0.1.0",
+  "description": "The orb for glitch: a Beep Jev-style creature that shows what your voice agent is doing.",
+  "kinds": ["panel"],
+  "keepLoaded": true,
+  "entryPoints": {
+    "panel": "Glitch.qml"
+  }
+}

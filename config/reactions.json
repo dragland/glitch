@@ -1,0 +1,167 @@
+{
+  "_about": "Beep Jev style reactions for each orb state and mood. Same fields Jev picks in the original: palette (electric sunset ocean citrus candy mono), pattern (rings checker waves dots stripes noise), motion (bounce orbit wobble breathe jitter still), voice (chirp blip bubble robot chatter whisper), basePitch, beepRate, energy, mood (curious surprised excited calm focused ... drive extra flourishes).",
+  "listening": {
+    "palette": "electric",
+    "pattern": "dots",
+    "motion": "breathe",
+    "voice": "chirp",
+    "basePitch": 440,
+    "beepRate": 5,
+    "energy": 0.5,
+    "mood": "curious"
+  },
+  "thinking": {
+    "palette": "ocean",
+    "pattern": "dots",
+    "motion": "breathe",
+    "voice": "bubble",
+    "basePitch": 380,
+    "beepRate": 4,
+    "energy": 0.35,
+    "mood": "focused"
+  },
+  "needs_you": {
+    "palette": "electric",
+    "pattern": "rings",
+    "motion": "bounce",
+    "voice": "chatter",
+    "basePitch": 500,
+    "beepRate": 6,
+    "energy": 0.6,
+    "mood": "surprised"
+  },
+  "error": {
+    "palette": "sunset",
+    "pattern": "noise",
+    "motion": "jitter",
+    "voice": "robot",
+    "basePitch": 220,
+    "beepRate": 8,
+    "energy": 0.8,
+    "mood": "angry"
+  },
+  "tool": {
+    "look": {
+      "palette": "ocean",
+      "pattern": "waves",
+      "motion": "orbit",
+      "voice": "chirp",
+      "basePitch": 560,
+      "beepRate": 6,
+      "energy": 0.4,
+      "mood": "focused"
+    },
+    "make": {
+      "palette": "citrus",
+      "pattern": "checker",
+      "motion": "wobble",
+      "voice": "blip",
+      "basePitch": 600,
+      "beepRate": 6,
+      "energy": 0.5,
+      "mood": "focused"
+    },
+    "run": {
+      "palette": "electric",
+      "pattern": "dots",
+      "motion": "orbit",
+      "voice": "chatter",
+      "basePitch": 420,
+      "beepRate": 6,
+      "energy": 0.5,
+      "mood": "focused"
+    },
+    "delegate": {
+      "palette": "candy",
+      "pattern": "rings",
+      "motion": "orbit",
+      "voice": "bubble",
+      "basePitch": 350,
+      "beepRate": 5,
+      "energy": 0.5,
+      "mood": "focused"
+    }
+  },
+  "mood": {
+    "happy": {
+      "palette": "citrus",
+      "pattern": "dots",
+      "motion": "bounce",
+      "voice": "chirp",
+      "basePitch": 520,
+      "beepRate": 7,
+      "energy": 0.7,
+      "mood": "happy"
+    },
+    "excited": {
+      "palette": "electric",
+      "pattern": "rings",
+      "motion": "bounce",
+      "voice": "blip",
+      "basePitch": 600,
+      "beepRate": 9,
+      "energy": 0.9,
+      "mood": "excited"
+    },
+    "proud": {
+      "palette": "sunset",
+      "pattern": "rings",
+      "motion": "breathe",
+      "voice": "chirp",
+      "basePitch": 480,
+      "beepRate": 6,
+      "energy": 0.7,
+      "mood": "happy"
+    },
+    "calm": {
+      "palette": "ocean",
+      "pattern": "waves",
+      "motion": "breathe",
+      "voice": "bubble",
+      "basePitch": 360,
+      "beepRate": 4,
+      "energy": 0.4,
+      "mood": "calm"
+    },
+    "curious": {
+      "palette": "candy",
+      "pattern": "dots",
+      "motion": "orbit",
+      "voice": "chirp",
+      "basePitch": 460,
+      "beepRate": 5,
+      "energy": 0.5,
+      "mood": "curious"
+    },
+    "unsure": {
+      "palette": "mono",
+      "pattern": "dots",
+      "motion": "wobble",
+      "voice": "whisper",
+      "basePitch": 400,
+      "beepRate": 4,
+      "energy": 0.3,
+      "mood": "curious"
+    },
+    "concerned": {
+      "palette": "sunset",
+      "pattern": "noise",
+      "motion": "jitter",
+      "voice": "robot",
+      "basePitch": 300,
+      "beepRate": 6,
+      "energy": 0.6,
+      "mood": "focused"
+    },
+    "sorry": {
+      "palette": "ocean",
+      "pattern": "waves",
+      "motion": "still",
+      "voice": "bubble",
+      "basePitch": 260,
+      "beepRate": 3,
+      "energy": 0.25,
+      "mood": "sad"
+    }
+  }
+}

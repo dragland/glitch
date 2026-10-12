@@ -1,0 +1,206 @@
+#!/usr/bin/env python3
+"""glitch's local Jev: pick the creature's reaction from what's happening.
+
+Like Jev (and Yohei's `glance`), it asks typed multiple-choice questions and
+reads the answer probabilities from a single forward pass of a small open model
+(Qwen3 1.7B on llama.cpp, the glitch-mind service) instead of generating text. The
+shared context is cached, so each extra question only costs its own tokens.
+
+    echo '{"phase":"working","user":"...","activity":"Edit: monitors.lua","words":"..."}' | decide
+    echo '{"phase":"done","user":"...","say":"...","reply":"...","mood":"happy"}' | decide
+
+Prints a reaction JSON (palette, pattern, motion, voice, basePitch, beepRate,
+energy, mood, plus "probs" for the curious). Prints nothing on failure, so the
+caller falls back to reactions.json.
+"""
+
+import json
+import math
+import sys
+import urllib.request
+
+URL = "http://127.0.0.1:8765/completion"
+LETTERS = "ABCDEFGH"
+
+QUESTIONS = {
+    "mood": ("Which mood fits the assistant right now?", [
+        ("happy", "happy, pleased, things went well"),
+        ("excited", "excited, delighted, a big win"),
+        ("calm", "calm, matter-of-fact, routine"),
+        ("curious", "curious, asking or exploring"),
+        ("focused", "focused, busy concentrating on work"),
+        ("surprised", "surprised, needs the user's attention"),
+        ("sad", "sad, sorry, something failed"),
+        ("worried", "worried, cautious, a risk or warning"),
+    ]),
+    "palette": ("Which colour palette fits the feeling?", [
+        ("ocean", "deep blue: calm, steady, thoughtful"),
+        ("candy", "pink and lavender: playful, friendly, curious"),
+        ("citrus", "lime and yellow: cheerful, pleased, success"),
+        ("sunset", "warm orange: cozy, proud, or cautious"),
+        ("electric", "cyan and hot pink: thrilled, intense, urgent"),
+        ("mono", "white and grey: neutral, unsure, low-key"),
+    ]),
+    "pattern": ("Which surface pattern fits the activity?", [
+        ("dots", "dot grid: the everyday default, steady work, running commands, answering"),
+        ("rings", "concentric rings: listening closely, focusing on one thing"),
+        ("waves", "flowing waves: searching, reading, browsing around"),
+        ("checker", "checkerboard: writing or editing files, building something"),
+        ("stripes", "diagonal stripes: frantic, rushing, lots happening at once"),
+        ("noise", "static noise: trouble, confusion, errors"),
+    ]),
+    "motion": ("Which body motion fits?", [
+        ("bounce", "bounce: joyful, excited"),
+        ("orbit", "orbit: searching, working away"),
+        ("wobble", "wobble: unsure, silly, playful"),
+        ("breathe", "breathe: calm, thinking, waiting"),
+        ("jitter", "jitter: anxious, alarmed, error"),
+        ("still", "still: sad, serious, sombre"),
+    ]),
+    "voice": ("Which beep voice fits?", [
+        ("chirp", "chirp: bright and friendly"),
+        ("blip", "blip: crisp, quick, excited"),
+        ("bubble", "bubble: soft, round, calm"),
+        ("robot", "robot: mechanical, serious, error"),
+        ("chatter", "chatter: talkative, busy"),
+        ("whisper", "whisper: quiet, hesitant"),
+    ]),
+    "energy": ("How much energy does the moment have, from 1 (very low) to 5 (very high)?", [
+        ("1", "1"), ("2", "2"), ("3", "3"), ("4", "4"), ("5", "5"),
+    ]),
+    "pitch": ("How high should its beeps be pitched?", [
+        ("260", "low and deep"), ("360", "a bit low"), ("440", "middle"),
+        ("540", "a bit high"), ("660", "high and squeaky"),
+    ]),
+    "rate": ("How fast should it beep?", [
+        ("3", "slow, unhurried"), ("4.5", "relaxed"), ("6", "normal"),
+        ("7.5", "quick"), ("9", "rapid, chattering"),
+    ]),
+}
+
+# Gentle taste priors multiplied into the model's probabilities (the dot
+# lattice reads best; stripes are loud as a default).
+PRIORS = {"pattern": {"dots": 1.8, "rings": 1.2, "stripes": 0.5}}
+ORDER = ["mood", "pattern", "palette", "motion", "voice", "energy", "pitch", "rate"]
+# While working, the orb shows what kind of work it is; trouble looks (static,
+# jitter, stillness) are kept for real outcomes. Fewer questions keep it quick.
+# The palette carries the mood over from the last turn while working (it's
+# emotional continuity); pattern and motion show the activity.
+WORKING_ORDER = ["pattern", "motion", "energy"]
+WORKING_EXCLUDE = {"pattern": {"noise"}, "motion": {"jitter", "still"}}
+
+
+def describe(ev):
+    lines = []
+    if ev.get("failed"):
+        lines.append("IMPORTANT: the task FAILED with an error. The mood is bad.")
+    if ev.get("mood") and ev.get("phase") != "working":
+        lines.append(f"The assistant's own mood tag: {ev['mood']}")
+    for h in ev.get("history") or []:
+        lines.append(f"Earlier, the user said: {h.get('user', '')[:160]}")
+        if h.get("say"):
+            lines.append(f"  and the assistant answered: {h['say'][:160]}")
+        r = h.get("reaction") or {}
+        if r:
+            lines.append(f"  (the orb then looked {r.get('mood')}, {r.get('palette')} {r.get('pattern')}, {r.get('motion')})")
+    if ev.get("user"):
+        lines.append(f"The user said: {ev['user'][:400]}")
+    sp = ev.get("speech") or {}
+    if sp.get("seconds"):
+        wps = sp.get("wps", 0)
+        pace = "slowly" if wps < 1.8 else "quickly, excitedly" if wps > 3.2 else "at a normal pace"
+        lines.append(f"They spoke for {sp['seconds']:.0f} seconds, {pace} ({wps:.1f} words per second).")
+    if ev.get("phase") == "working":
+        if ev.get("activity"):
+            lines.append(f"The assistant is currently doing: {ev['activity'][:160]}")
+        if ev.get("words"):
+            lines.append(f"The assistant's latest words: {ev['words'][-400:]}")
+        if not ev.get("activity") and not ev.get("words"):
+            lines.append("The assistant has just started thinking about it.")
+    else:
+        if ev.get("say"):
+            lines.append(f"The assistant finished and said: {ev['say'][:200]}")
+        if ev.get("reply"):
+            lines.append(f"Full reply (start): {ev['reply'][:500]}")
+    return "\n".join(lines)
+
+
+def ask(context, question, options, timeout):
+    opts = "\n".join(f"{LETTERS[i]}) {desc}" for i, (_, desc) in enumerate(options))
+    prompt = (
+        "<|im_start|>system\nYou choose how an animated companion orb expresses an AI "
+        "assistant's state, the way a character animator would.<|im_end|>\n"
+        f"<|im_start|>user\n{context}\n\n{question}\n{opts}\nReply with one letter.<|im_end|>\n"
+        "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    )
+    body = json.dumps({"prompt": prompt, "n_predict": 1, "n_probs": 12,
+                       "temperature": 0, "cache_prompt": True}).encode()
+    req = urllib.request.Request(URL, body, {"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        out = json.load(r)
+    top = out["completion_probabilities"][0]
+    top = top.get("top_logprobs") or top.get("probs") or []
+    probs = {}
+    for t in top:
+        tok = t["token"].strip()
+        if len(tok) == 1 and tok in LETTERS[:len(options)]:
+            p = math.exp(t["logprob"]) if "logprob" in t else t.get("prob", 0)
+            probs[options[LETTERS.index(tok)][0]] = probs.get(options[LETTERS.index(tok)][0], 0) + p
+    total = sum(probs.values()) or 1
+    return {k: v / total for k, v in probs.items()}
+
+
+def main():
+    try:
+        ev = json.load(sys.stdin)
+    except json.JSONDecodeError:
+        return 1
+    context = describe(ev)
+    timeout = float(ev.get("timeout", 3))
+    working = ev.get("phase") == "working"
+    answers = {}
+    try:
+        for key in (WORKING_ORDER if working else ORDER):
+            q, opts = QUESTIONS[key]
+            if working:
+                opts = [o for o in opts if o[0] not in WORKING_EXCLUDE.get(key, ())]
+            a = ask(context, q, opts, timeout)
+            for o, w in PRIORS.get(key, {}).items():
+                if o in a:
+                    a[o] *= w
+            t = sum(a.values()) or 1
+            answers[key] = {o: v / t for o, v in a.items()}
+    except Exception:
+        return 1
+
+    def pick(key, default):
+        a = answers.get(key) or {}
+        return max(a, key=a.get) if a else default
+
+    def expect(key, default):
+        a = answers.get(key) or {}
+        return round(sum(float(k) * v for k, v in a.items())) if a else round(default)
+
+    energy_dist = answers.get("energy") or {}
+    energy = sum(int(k) * v for k, v in energy_dist.items()) if energy_dist else 3
+    energy = round((energy - 1) / 4, 2)  # 0..1
+    mood = pick("mood", "focused" if working else "calm")
+    last = ((ev.get("history") or [{}])[-1].get("reaction") or {})
+    reaction = {
+        "palette": last.get("palette", "ocean") if working else pick("palette", "electric"),
+        "pattern": pick("pattern", "rings"),
+        "motion": pick("motion", "breathe"),
+        "voice": pick("voice", "chatter" if working else "chirp"),
+        "energy": energy,
+        "mood": mood,
+        # Pitch and rate follow energy, nudged by mood, like the original's ranges.
+        "basePitch": expect("pitch", 300 + energy * 300),
+        "beepRate": round(expect("rate", 3 + energy * 6), 1),
+        "probs": {k: {o: round(p, 3) for o, p in v.items()} for k, v in answers.items()},
+    }
+    print(json.dumps(reaction))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
