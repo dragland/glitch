@@ -2,9 +2,14 @@
 """glitch's local Jev: pick the creature's reaction from what's happening.
 
 Like Jev (and Yohei's `glance`), it asks typed multiple-choice questions and
-reads each answer's probabilities from one forward pass of a small open model
-(Qwen3 1.7B on llama.cpp, the glitch-mind service) instead of generating text.
-The shared context is cached; questions run in parallel on the server's slots.
+reads each answer's probabilities instead of generating text. Backends (MIND):
+
+    local   Qwen3 1.7B on llama.cpp (the glitch-mind service): one forward pass
+            per question, parallel on the server's slots, context cached
+    jev     TypeSafe's Jev (POST /v1/systemone), all questions in one call
+    openai  OpenAI's Decisions API (POST /v1/decisions), all questions in one call
+
+Keys: TYPESAFE_API_KEY / OPENAI_API_KEY, else ~/.config/glitch/{typesafe,openai}.key.
 
     echo '{"phase":"working","user":"...","activity":"Edit: monitors.lua","words":"..."}' | decide
     echo '{"phase":"done","user":"...","say":"...","reply":"...","mood":"happy"}' | decide
@@ -23,9 +28,11 @@ import traceback
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, wait
 
-URL = "http://127.0.0.1:8765/completion"
-KEY_FILE = os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "glitch", "mind.key")
+LOCAL_URL = "http://127.0.0.1:8765/completion"
+LOCAL_KEY = os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "glitch", "mind.key")
 SLOTS = 2  # glitch-mind runs -np 2
+SYSTEM = ("You choose how an animated companion orb expresses an AI "
+          "assistant's state, the way a character animator would.")
 LETTERS = "ABCDEFGH"
 
 QUESTIONS = {
@@ -132,64 +139,121 @@ def describe(ev):
     return "\n".join(lines)
 
 
-def ask(context, question, options, timeout, key):
-    opts = "\n".join(f"{LETTERS[i]}) {desc}" for i, (_, desc) in enumerate(options))
-    prompt = (
-        "<|im_start|>system\nYou choose how an animated companion orb expresses an AI "
-        "assistant's state, the way a character animator would.<|im_end|>\n"
-        f"<|im_start|>user\n{context}\n\n{question}\n{opts}\nReply with one letter.<|im_end|>\n"
-        "<|im_start|>assistant\n<think>\n\n</think>\n\n"
-    )
-    body = json.dumps({"prompt": prompt, "n_predict": 1, "n_probs": 12,
-                       "temperature": 0, "cache_prompt": True}).encode()
-    req = urllib.request.Request(URL, body, {"Content-Type": "application/json", "Authorization": f"Bearer {key}"})
+def read_key(env, path):
+    key = os.environ.get(env)
+    if not key:
+        with open(os.path.expanduser(path)) as f:
+            key = f.read()
+    return key.strip()
+
+
+def post(url, body, key, timeout):
+    req = urllib.request.Request(url, json.dumps(body).encode(),
+                                 {"Content-Type": "application/json", "Authorization": f"Bearer {key}"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
-        out = json.load(r)
-    probs = {}
-    for t in out["completion_probabilities"][0]["top_logprobs"]:
-        tok = t["token"].strip()
-        if len(tok) == 1 and tok in LETTERS[:len(options)]:
-            name = options[LETTERS.index(tok)][0]
-            probs[name] = probs.get(name, 0) + math.exp(t["logprob"])
-    return probs
+        return json.load(r)
+
+
+# Each backend: (context, {name: (question, [(value, description)])}, deadline)
+# -> {name: {value: probability}}. Raise on failure.
+
+def ask_local(context, questions, deadline):
+    key = read_key("GLITCH_MIND_KEY", LOCAL_KEY)
+
+    def one(question, options):
+        opts = "\n".join(f"{LETTERS[i]}) {desc}" for i, (_, desc) in enumerate(options))
+        prompt = (f"<|im_start|>system\n{SYSTEM}<|im_end|>\n"
+                  f"<|im_start|>user\n{context}\n\n{question}\n{opts}\nReply with one letter.<|im_end|>\n"
+                  "<|im_start|>assistant\n<think>\n\n</think>\n\n")
+        out = post(LOCAL_URL, {"prompt": prompt, "n_predict": 1, "n_probs": 12, "temperature": 0, "cache_prompt": True},
+                   key, max(0.1, deadline - time.monotonic()))
+        probs = {}
+        for t in out["completion_probabilities"][0]["top_logprobs"]:
+            tok = t["token"].strip()
+            if len(tok) == 1 and tok in LETTERS[:len(options)]:
+                name = options[LETTERS.index(tok)][0]
+                probs[name] = probs.get(name, 0) + math.exp(t["logprob"])
+        return probs
+
+    pool = ThreadPoolExecutor(max_workers=SLOTS)
+    futures = {n: pool.submit(one, q, o) for n, (q, o) in questions.items()}
+    _, pending = wait(futures.values(), timeout=max(0, deadline - time.monotonic()))
+    pool.shutdown(wait=False, cancel_futures=True)
+    if pending:
+        raise TimeoutError(f"deadline passed with {len(pending)} questions open")
+    return {n: f.result() for n, f in futures.items()}
+
+
+def ask_jev(context, questions, deadline):
+    body = {"model": os.environ.get("JEV_MODEL", "jev-latest"),
+            "state": f"{SYSTEM}\n\n{context}",
+            "questions": {n: {"type": "choice", "instructions": q, "criteria": dict(opts)}
+                          for n, (q, opts) in questions.items()}}
+    out = post("https://api.typesafe.ai/v1/systemone", body,
+               read_key("TYPESAFE_API_KEY", "~/.config/glitch/typesafe.key"), max(0.1, deadline - time.monotonic()))
+    return {n: {o: float(p) for o, p in (a.get("probabilities") or {}).items()}
+            for n, a in (out.get("answers") or {}).items() if a.get("type") == "choice"}
+
+
+def ask_openai(context, questions, deadline):
+    body = {"model": os.environ.get("OPENAI_DECIDE_MODEL", "gpt-6-luna"),
+            "input": f"{SYSTEM}\n\n{context}",
+            "questions": [{"type": "choice", "name": n, "instructions": q,
+                           "choices": [{"value": v, "description": d} for v, d in opts]}
+                          for n, (q, opts) in questions.items()]}
+    out = post("https://api.openai.com/v1/decisions", body,
+               read_key("OPENAI_API_KEY", "~/.config/glitch/openai.key"), max(0.1, deadline - time.monotonic()))
+    return {a["name"]: {str(p["value"]): float(p["probability"]) for p in a.get("probabilities") or []}
+            for a in out.get("answers") or [] if a.get("type") == "choice"}
+
+
+BACKENDS = {"local": ask_local, "jev": ask_jev, "openai": ask_openai}
 
 
 def main():
     try:
         ev = json.load(sys.stdin)
-        with open(KEY_FILE) as f:
-            key = f.read().strip()
-    except (json.JSONDecodeError, OSError) as e:
+    except json.JSONDecodeError as e:
         print(f"decide: {e}", file=sys.stderr)
+        return 1
+    backend = BACKENDS.get(os.environ.get("MIND", "local"))
+    if backend is None:
+        print(f"decide: unknown MIND {os.environ.get('MIND')!r}", file=sys.stderr)
         return 1
     context = describe(ev)
     working = ev.get("phase") == "working"
     deadline = time.monotonic() + float(ev.get("deadline", 3))
-    keys = WORKING_ORDER if working else ORDER
-
-    def question(key_name):
-        q, opts = QUESTIONS[key_name]
+    questions = {}
+    for name in (WORKING_ORDER if working else ORDER):
+        q, opts = QUESTIONS[name]
         if working:
-            opts = [o for o in opts if o[0] not in WORKING_EXCLUDE.get(key_name, ())]
-        a = ask(context, q, opts, max(0.1, deadline - time.monotonic()), key)
-        for o, w in PRIORS.get(key_name, {}).items():
-            if o in a:
-                a[o] *= w
-        t = sum(a.values()) or 1
-        return {o: v / t for o, v in a.items()}
+            opts = [o for o in opts if o[0] not in WORKING_EXCLUDE.get(name, ())]
+        questions[name] = (q, opts)
 
-    pool = ThreadPoolExecutor(max_workers=SLOTS)
-    futures = {k: pool.submit(question, k) for k in keys}
-    done, pending = wait(futures.values(), timeout=max(0, deadline - time.monotonic()))
+    # Run the backend under one overall deadline (a urllib timeout is per
+    # socket operation, not per call).
+    pool = ThreadPoolExecutor(max_workers=1)
+    future = pool.submit(backend, context, questions, deadline)
+    done, _ = wait([future], timeout=max(0, deadline - time.monotonic()) + 0.2)
     pool.shutdown(wait=False, cancel_futures=True)
-    if pending:
-        print(f"decide: deadline passed with {len(pending)} questions open", file=sys.stderr)
+    if not done:
+        print("decide: deadline passed", file=sys.stderr)
         return 1
     try:
-        answers = {k: f.result() for k, f in futures.items()}
+        raw = future.result()
+    except (OSError, ValueError) as e:  # network, HTTP status, missing key, bad JSON
+        print(f"decide: {os.environ.get('MIND', 'local')}: {e}", file=sys.stderr)
+        return 1
     except Exception:
         traceback.print_exc()
         return 1
+    answers = {}
+    for name, a in raw.items():
+        for o, w in PRIORS.get(name, {}).items():
+            if o in a:
+                a[o] *= w
+        t = sum(a.values()) or 1
+        answers[name] = {o: v / t for o, v in a.items()}
 
     def pick(name, default):
         a = answers.get(name) or {}
