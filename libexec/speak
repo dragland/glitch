@@ -1,0 +1,33 @@
+#!/usr/bin/env python3
+"""Warm Piper for one turn: load the voice now (~1.2 s, while the agent works),
+then wait on a FIFO for the line to say, synthesize it (~0.1-0.2 s) and exit.
+
+    speak VOICE.onnx FIFO OUT.wav
+
+OUT.wav appears atomically. Empty input (or the FIFO closing unwritten) exits
+without output.
+"""
+
+import os
+import sys
+import wave
+
+from piper import PiperVoice
+
+
+def main():
+    model, fifo, out = sys.argv[1:4]
+    voice = PiperVoice.load(model)
+    with open(fifo, encoding="utf-8", errors="replace") as f:
+        text = f.read().strip()
+    if not text:
+        return 0
+    tmp = out + ".tmp"
+    with wave.open(tmp, "wb") as w:
+        voice.synthesize_wav(text, w)
+    os.replace(tmp, out)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

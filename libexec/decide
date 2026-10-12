@@ -2,24 +2,30 @@
 """glitch's local Jev: pick the creature's reaction from what's happening.
 
 Like Jev (and Yohei's `glance`), it asks typed multiple-choice questions and
-reads the answer probabilities from a single forward pass of a small open model
-(Qwen3 1.7B on llama.cpp, the glitch-mind service) instead of generating text. The
-shared context is cached, so each extra question only costs its own tokens.
+reads each answer's probabilities from one forward pass of a small open model
+(Qwen3 1.7B on llama.cpp, the glitch-mind service) instead of generating text.
+The shared context is cached; questions run in parallel on the server's slots.
 
     echo '{"phase":"working","user":"...","activity":"Edit: monitors.lua","words":"..."}' | decide
     echo '{"phase":"done","user":"...","say":"...","reply":"...","mood":"happy"}' | decide
 
 Prints a reaction JSON (palette, pattern, motion, voice, basePitch, beepRate,
-energy, mood, plus "probs" for the curious). Prints nothing on failure, so the
-caller falls back to reactions.json.
+energy, mood). Prints nothing if anything fails or the "deadline" (seconds)
+passes, so the caller falls back to reactions.json; errors go to stderr.
 """
 
 import json
 import math
+import os
 import sys
+import time
+import traceback
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, wait
 
 URL = "http://127.0.0.1:8765/completion"
+KEY_FILE = os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "glitch", "mind.key")
+SLOTS = 2  # glitch-mind runs -np 2
 LETTERS = "ABCDEFGH"
 
 QUESTIONS = {
@@ -83,11 +89,12 @@ QUESTIONS = {
 PRIORS = {"pattern": {"dots": 1.8, "rings": 1.2, "stripes": 0.5}}
 ORDER = ["mood", "pattern", "palette", "motion", "voice", "energy", "pitch", "rate"]
 # While working, the orb shows what kind of work it is; trouble looks (static,
-# jitter, stillness) are kept for real outcomes. Fewer questions keep it quick.
+# jitter, stillness) are kept for real outcomes, and rings are reserved for
+# listening so a live mic always looks distinct. Fewer questions keep it quick.
 # The palette carries the mood over from the last turn while working (it's
 # emotional continuity); pattern and motion show the activity.
 WORKING_ORDER = ["pattern", "motion", "energy"]
-WORKING_EXCLUDE = {"pattern": {"noise"}, "motion": {"jitter", "still"}}
+WORKING_EXCLUDE = {"pattern": {"noise", "rings"}, "motion": {"jitter", "still"}}
 
 
 def describe(ev):
@@ -125,7 +132,7 @@ def describe(ev):
     return "\n".join(lines)
 
 
-def ask(context, question, options, timeout):
+def ask(context, question, options, timeout, key):
     opts = "\n".join(f"{LETTERS[i]}) {desc}" for i, (_, desc) in enumerate(options))
     prompt = (
         "<|im_start|>system\nYou choose how an animated companion orb expresses an AI "
@@ -135,70 +142,76 @@ def ask(context, question, options, timeout):
     )
     body = json.dumps({"prompt": prompt, "n_predict": 1, "n_probs": 12,
                        "temperature": 0, "cache_prompt": True}).encode()
-    req = urllib.request.Request(URL, body, {"Content-Type": "application/json"})
+    req = urllib.request.Request(URL, body, {"Content-Type": "application/json", "Authorization": f"Bearer {key}"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         out = json.load(r)
-    top = out["completion_probabilities"][0]
-    top = top.get("top_logprobs") or top.get("probs") or []
     probs = {}
-    for t in top:
+    for t in out["completion_probabilities"][0]["top_logprobs"]:
         tok = t["token"].strip()
         if len(tok) == 1 and tok in LETTERS[:len(options)]:
-            p = math.exp(t["logprob"]) if "logprob" in t else t.get("prob", 0)
-            probs[options[LETTERS.index(tok)][0]] = probs.get(options[LETTERS.index(tok)][0], 0) + p
-    total = sum(probs.values()) or 1
-    return {k: v / total for k, v in probs.items()}
+            name = options[LETTERS.index(tok)][0]
+            probs[name] = probs.get(name, 0) + math.exp(t["logprob"])
+    return probs
 
 
 def main():
     try:
         ev = json.load(sys.stdin)
-    except json.JSONDecodeError:
+        with open(KEY_FILE) as f:
+            key = f.read().strip()
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"decide: {e}", file=sys.stderr)
         return 1
     context = describe(ev)
-    timeout = float(ev.get("timeout", 3))
     working = ev.get("phase") == "working"
-    answers = {}
+    deadline = time.monotonic() + float(ev.get("deadline", 3))
+    keys = WORKING_ORDER if working else ORDER
+
+    def question(key_name):
+        q, opts = QUESTIONS[key_name]
+        if working:
+            opts = [o for o in opts if o[0] not in WORKING_EXCLUDE.get(key_name, ())]
+        a = ask(context, q, opts, max(0.1, deadline - time.monotonic()), key)
+        for o, w in PRIORS.get(key_name, {}).items():
+            if o in a:
+                a[o] *= w
+        t = sum(a.values()) or 1
+        return {o: v / t for o, v in a.items()}
+
+    pool = ThreadPoolExecutor(max_workers=SLOTS)
+    futures = {k: pool.submit(question, k) for k in keys}
+    done, pending = wait(futures.values(), timeout=max(0, deadline - time.monotonic()))
+    pool.shutdown(wait=False, cancel_futures=True)
+    if pending:
+        print(f"decide: deadline passed with {len(pending)} questions open", file=sys.stderr)
+        return 1
     try:
-        for key in (WORKING_ORDER if working else ORDER):
-            q, opts = QUESTIONS[key]
-            if working:
-                opts = [o for o in opts if o[0] not in WORKING_EXCLUDE.get(key, ())]
-            a = ask(context, q, opts, timeout)
-            for o, w in PRIORS.get(key, {}).items():
-                if o in a:
-                    a[o] *= w
-            t = sum(a.values()) or 1
-            answers[key] = {o: v / t for o, v in a.items()}
+        answers = {k: f.result() for k, f in futures.items()}
     except Exception:
+        traceback.print_exc()
         return 1
 
-    def pick(key, default):
-        a = answers.get(key) or {}
+    def pick(name, default):
+        a = answers.get(name) or {}
         return max(a, key=a.get) if a else default
 
-    def expect(key, default):
-        a = answers.get(key) or {}
-        return round(sum(float(k) * v for k, v in a.items())) if a else round(default)
+    def expect(name, default):
+        a = answers.get(name) or {}
+        return sum(float(k) * v for k, v in a.items()) if a else default
 
-    energy_dist = answers.get("energy") or {}
-    energy = sum(int(k) * v for k, v in energy_dist.items()) if energy_dist else 3
-    energy = round((energy - 1) / 4, 2)  # 0..1
-    mood = pick("mood", "focused" if working else "calm")
+    energy = round((expect("energy", 3) - 1) / 4, 2)  # 1..5 -> 0..1
     last = ((ev.get("history") or [{}])[-1].get("reaction") or {})
-    reaction = {
+    print(json.dumps({
         "palette": last.get("palette", "ocean") if working else pick("palette", "electric"),
-        "pattern": pick("pattern", "rings"),
+        "pattern": pick("pattern", "dots"),
         "motion": pick("motion", "breathe"),
         "voice": pick("voice", "chatter" if working else "chirp"),
         "energy": energy,
-        "mood": mood,
-        # Pitch and rate follow energy, nudged by mood, like the original's ranges.
-        "basePitch": expect("pitch", 300 + energy * 300),
+        "mood": pick("mood", "focused" if working else "calm"),
+        # Without the pitch/rate questions (while working), follow energy.
+        "basePitch": round(expect("pitch", 300 + energy * 300)),
         "beepRate": round(expect("rate", 3 + energy * 6), 1),
-        "probs": {k: {o: round(p, 3) for o, p in v.items()} for k, v in answers.items()},
-    }
-    print(json.dumps(reaction))
+    }))
     return 0
 
 
