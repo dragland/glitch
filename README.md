@@ -19,7 +19,9 @@ git clone git@github.com:dragland/glitch.git ~/Work/glitch
 ```
 
 Needs Omarchy 4 with voxtype dictation (`omarchy-voxtype-install`) and Claude
-Code installed. No sudo. The installer downloads ~1.3 GB (voice, llama.cpp,
+Code or Codex installed. glitch drives your Omarchy default agent
+(`omarchy default agent claude|codex`) with the same permission mode Omarchy
+launches it with. No sudo. The installer downloads ~1.3 GB (voice, llama.cpp,
 Qwen3 1.7B; pinned and checksummed) into `~/.local/share/glitch`; `--no-mind`
 skips the model and uses fixed reactions.
 
@@ -39,9 +41,11 @@ A tap while glitch is talking just quiets it. Say "new task, …" to start fresh
 by voice. A session stays current for 15 minutes after its last turn; while the
 reply card is on screen, the next Super+D continues it.
 
-The agent runs in `WORKDIR` (~/Work) with `--permission-mode auto` and nobody
-to answer prompts: anything auto mode won't allow is denied, and glitch says
-"Need you: …" — click the card to finish in the terminal.
+The agent runs in `WORKDIR` (~/Work) the way Omarchy runs it: Claude with
+`--permission-mode auto`, Codex with `--approve-for-me` (workspace-write
+sandbox, auto reviewer). When Claude would ask your permission, the orb asks
+out loud and Omarchy's menu offers Allow once / Deny. Anything needing root
+goes through `pkexec`, so you get Omarchy's fingerprint or password dialog.
 
 ## How it works
 
@@ -63,7 +67,8 @@ to answer prompts: anything auto mode won't allow is denied, and glitch says
 ```
 
 - **bin/glitch** is the whole pipeline: the key state machine, the session
-  policy, the Claude adapter, live decisions, speech and the reply card.
+  policy, the agent adapters (Claude, Codex), the approval hook, live
+  decisions, speech and the reply card.
   Runtime state lives in `$XDG_RUNTIME_DIR/glitch/` (`glitch.log` first when
   debugging).
 - **plugin/** is an Omarchy shell plugin (`dragland.glitch`, a click-through
@@ -74,7 +79,9 @@ to answer prompts: anything auto mode won't allow is denied, and glitch says
   works and renders the SAY line when it arrives. **libexec/decide** asks the
   local model multiple-choice questions (mood, pattern, palette, motion, voice,
   energy, pitch, rate; only pattern, motion and energy while working) and reads
-  each answer's probabilities from one forward pass, in parallel.
+  each answer's probabilities. `MIND` picks the backend: `local` (the
+  glitch-mind model), `jev` (TypeSafe) or `openai` (Decisions API), with keys in
+  `~/.config/glitch/{typesafe,openai}.key`.
 - **config/** holds the defaults: `glitch.conf` (settings),
   `voice-prompt.md` (the SAY/MOOD reply convention given to the agent) and
   `reactions.json` (fallback reactions for each state and mood).
