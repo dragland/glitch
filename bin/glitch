@@ -12,13 +12,8 @@
 #   glitch say <text>      speak text with glitch's voice
 #   glitch state           print the current orb state
 #
-# Layout (see README.md):
-#   code       this repo, symlinked into place by install.sh
-#   defaults   <repo>/config/{glitch.conf,voice-prompt.md,reactions.json}
-#   overrides  ~/.config/glitch/ (glitch.conf is sourced after the default,
-#              reactions.json is merged over it, voice-prompt.md replaces it)
-#   data       ~/.local/share/glitch/ (venv, voices, models, llama.cpp, mind.key)
-#   runtime    $XDG_RUNTIME_DIR/glitch/ (state.json, sid, history.jsonl, glitch.log)
+# Defaults in <repo>/config, overrides in ~/.config/glitch, downloads in
+# ~/.local/share/glitch, live state in $XDG_RUNTIME_DIR/glitch.
 
 set -uo pipefail
 export LC_CTYPE=${LC_CTYPE:-C.UTF-8} # string slicing below must count characters
@@ -245,7 +240,8 @@ adapter_claude() {
     --permission-mode auto --permission-prompts none --settings "$hook"
     --append-system-prompt "$(voice_prompt)")
   [[ -n $sid ]] && args+=(--resume "$sid")
-  # SIGINT ends a turn cleanly (SIGTERM leaves it unrecorded).
+  # stream-json requires --verbose. SIGINT ends a turn cleanly (SIGTERM leaves
+  # it unrecorded).
   timeout --signal=INT --kill-after=15 "$TURN_TIMEOUT" claude "${args[@]}" 2>>"$RT/glitch.log" 9>&- |
     jq --unbuffered -rR 'fromjson? // empty |
     def clip(n): if length > n then .[0:n] + "…" else . end;
@@ -307,6 +303,8 @@ adapter_codex() {
       elif .type == "collab_tool_call" then
         if .tool == "spawn_agent" then "delegate\tAgent: \(.prompt // "" | short)" else empty end
       else empty end;
+    # Some items arrive only as item.completed (Codex batches shell calls
+    # without an item.started), so a tool line is emitted on whichever comes first.
     foreach (inputs | fromjson? // empty) as $e ({seen: {}, last: "", denied: 0};
       if $e.type == "item.started" then .seen[$e.item.id] = true
       elif $e.type == "item.completed" then
@@ -545,8 +543,8 @@ cmd_turn() {
   body=$(markup_escape "${result:0:900}")
   stop_live
 
-  # Speak first with Claude's own mood; the model's final reaction lands on the
-  # orb when it's ready.
+  # Speak first, with the agent's own MOOD; the decision model's final reaction
+  # lands on the orb when it's ready.
   [[ -n $failed ]] && say="Sorry, something went wrong."
   [[ -x $PY ]] && jq -cn --arg user "$text" --arg say "$say" --arg reply "${result:0:900}" --arg mood "$mood" \
     --argjson failed "$([[ -n $failed ]] && echo true || echo false)" --argjson history "$(recent_history "$SID")" \

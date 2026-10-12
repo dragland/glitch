@@ -1,5 +1,5 @@
 {
-  "_about": "Beep Jev style reactions for each orb state and mood. Same fields Jev picks in the original: palette (electric sunset ocean citrus candy mono), pattern (rings checker waves dots stripes noise), motion (bounce orbit wobble breathe jitter still), voice (chirp blip bubble robot chatter whisper), basePitch, beepRate, energy, mood (curious surprised excited calm focused ... drive extra flourishes).",
+  "_about": "Fallback reactions (the fields Jev picks in the original) for each orb state, tool category and agent MOOD; the decision model refines them. Names must match Glitch.qml, glitch.frag and libexec/cue.",
   "listening": {
     "palette": "electric",
     "pattern": "rings",
@@ -73,7 +73,7 @@
     },
     "delegate": {
       "palette": "candy",
-      "pattern": "rings",
+      "pattern": "dots",
       "motion": "orbit",
       "voice": "bubble",
       "basePitch": 350,

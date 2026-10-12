@@ -7,9 +7,8 @@ import qs.Commons
 
 // The face of glitch (bin/glitch): a port of the Beep Jev creature
 // (beepjev.replit.app, Yohei Nakajima). Its CSS patterns, borders and glows are
-// drawn by glitch.frag (install.sh compiles it: qsb --qt6 -o glitch.frag.qsb glitch.frag)
-// and its CSS keyframe motions run as scene-graph animations, so everything
-// moves at the display's refresh rate on the GPU.
+// drawn by glitch.frag and its CSS keyframe motions run as scene-graph
+// animations, so everything moves at the display's refresh rate on the GPU.
 //
 // The script pushes a state plus a Jev-style reaction:
 //   omarchy-shell glitch set '{"state":"tool","reaction":{"palette":"ocean","pattern":"waves",
