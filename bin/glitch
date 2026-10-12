@@ -64,15 +64,17 @@ set_state() {
   omarchy-shell -q glitch set "$json" >/dev/null 2>&1 || true
 }
 
+# The current session id, if it's fresh and belongs to agent $1 (sid.agent):
+# switching agents starts a new session rather than resuming a foreign id.
 current_sid() {
   local f="$RT/sid"
-  [[ -s $f ]] || return 1
+  [[ -s $f && $(cat "$RT/sid.agent" 2>/dev/null) == "$1" ]] || return 1
   ((EPOCHSECONDS - $(stat -c %Y "$f") < RESUME_WINDOW)) || return 1
   cat "$f"
 }
 
 forget_session() {
-  rm -f "$RT/sid" "$RT/history.jsonl"
+  rm -f "$RT/sid" "$RT/sid.agent" "$RT/history.jsonl"
   close_card
 }
 
@@ -273,20 +275,83 @@ adapter_claude() {
   echo "exit ${PIPESTATUS[0]}"
 }
 
+# Codex CLI (`codex exec --json`, tested on codex-cli 0.162.1). The stream has
+# no text deltas: each agent_message arrives whole on item.completed, and the
+# last one before turn.completed is the final reply. `exec resume` has no
+# --approve-for-me/-s/-C flags, so the same policy goes in as -c keys (what
+# --approve-for-me sets: workspace-write, on-request, auto_review), and the
+# session runs in the caller's cwd, which glitch has already cd'd to.
+adapter_codex() {
+  local sid=${1:-} args
+  args=(--json --skip-git-repo-check
+    -c 'sandbox_mode="workspace-write"' -c 'approval_policy="on-request"'
+    -c 'approvals_reviewer="auto_review"'
+    -c "developer_instructions=$(voice_prompt | jq -Rs .)")
+  if [[ -n $sid ]]; then args=(exec resume "${args[@]}" "$sid" -); else args=(exec "${args[@]}" -); fi
+  # SIGINT ends a turn cleanly (it's recorded as interrupted and stays resumable).
+  timeout --signal=INT --kill-after=15 "$TURN_TIMEOUT" codex "${args[@]}" 2>>"$RT/glitch.log" 9>&- |
+    jq --unbuffered -nrR --arg cwd "$PWD/" '
+    def clip(n): if length > n then .[0:n] + "…" else . end;
+    def short: tostring | split("\n")[0] | ltrimstr($cwd) | sub("^/home/[^/]+/"; "~/") | clip(48);
+    def unwrap: sub("^(/usr)?/bin/(ba|z)?sh -l?c "; "") | sub("^\u0027(?<c>.*)\u0027$"; "\(.c)") | sub("^\"(?<c>.*)\"$"; "\(.c)");
+    def tagline(k): [.[] | select(test("^\\s*" + k + ":"))] | last // "" | sub("^\\s*" + k + ":\\s*"; "");
+    def plain: split("\n") | map(select(test("^\\s*(SAY|MOOD):") | not)) | join("\n") | sub("\\s+$"; "");
+    def tool: if .type == "command_execution" then (.command | unwrap) as $c |
+        (if ($c | test("^\\s*(ls|cat|head|tail|rg|grep|find|fd|tree|wc|stat|file|pwd|sed -n|git (status|log|diff|show))\\b"))
+         then "look" else "run" end) + "\tShell: \($c | short)"
+      elif .type == "file_change" then
+        "make\t\({add: "Write", delete: "Delete"}[.changes[0].kind // ""] // "Edit"): \(.changes[0].path // "" | short)" +
+        (if (.changes | length) > 1 then " +\((.changes | length) - 1)" else "" end)
+      elif .type == "web_search" then "look\tWebSearch: \(.query // "" | short)"
+      elif .type == "mcp_tool_call" then "run\t\(.server).\(.tool)"
+      elif .type == "collab_tool_call" then
+        if .tool == "spawn_agent" then "delegate\tAgent: \(.prompt // "" | short)" else empty end
+      else empty end;
+    foreach (inputs | fromjson? // empty) as $e ({seen: {}, last: "", denied: 0};
+      if $e.type == "item.started" then .seen[$e.item.id] = true
+      elif $e.type == "item.completed" then
+        (if $e.item.type == "agent_message" then .last = $e.item.text else . end) |
+        (if $e.item.status == "declined" then .denied += 1 else . end)
+      else . end;
+      . as $s | $e |
+      if .type == "thread.started" then "sid \(.thread_id)", "mode auto_review"
+      elif .type == "item.started" then .item | tool
+      elif .type == "item.completed" then .item |
+        if .type == "agent_message" or .type == "reasoning" then
+          (.text | plain | select(. != "") | "words \(gsub("\\s+"; " "))")
+        elif $s.seen[.id] then empty else tool end
+      elif .type == "turn.failed" then "error \(.error.message // "turn failed" | gsub("\n"; " "))"
+      elif .type == "turn.completed" then
+        (if $s.denied > 0 then "denied \($s.denied)" else empty end),
+        ($s.last | split("\n")) as $ls |
+        "mood \($ls | tagline("MOOD") | ascii_downcase | gsub("[^a-z]"; ""))",
+        "say \($ls | tagline("SAY") | gsub("\n"; " "))",
+        "result \($s.last | plain | tojson)"
+      else empty end)'
+  echo "exit ${PIPESTATUS[0]}"
+}
+
 # glitch follows Omarchy's default agent where it has an adapter for it, and
 # uses Claude Code otherwise.
 agent_name() {
-  local agent
-  agent=$(omarchy-default-agent 2>/dev/null)
+  local agent=${GLITCH_AGENT:-} # override for testing
+  [[ -n $agent ]] || agent=$(omarchy-default-agent 2>/dev/null)
   case "$agent" in
-  claude | "") echo claude ;;
+  claude | codex) echo "$agent" ;;
+  "") echo claude ;;
   *) log "no glitch adapter for default agent '$agent'; using claude"; echo claude ;;
   esac
 }
 
 run_agent() { "adapter_$1" "$2"; }
 
-open_agent() { exec omarchy-launch-tui --app-id=org.omarchy.agent claude --resume "$2"; }
+# Take over in the agent's own TUI, with the same permission mode Omarchy uses.
+open_agent() {
+  case "$1" in
+  codex) exec omarchy-launch-tui --app-id=org.omarchy.agent codex resume --approve-for-me "$2" ;;
+  *) exec omarchy-launch-tui --app-id=org.omarchy.agent claude --permission-mode auto --resume "$2" ;;
+  esac
+}
 
 # --- commands -----------------------------------------------------------------------
 
@@ -410,7 +475,7 @@ cmd_turn() {
 
   agent=$(agent_name)
   SID=""
-  [[ $fresh == true ]] || SID=$(current_sid) || SID=""
+  [[ $fresh == true ]] || SID=$(current_sid "$agent") || SID=""
   log "turn agent=$agent sid=${SID:-new} text=$text"
   rm -f "$RT/live.json" "$RT/live.in"
   speech_warm
@@ -423,7 +488,13 @@ cmd_turn() {
     kind=${line%% *}
     rest=${line#* }
     case "$kind" in
-    sid) [[ -n $rest && $rest != null ]] && SID=$rest && printf '%s' "$rest" >"$RT/sid" ;;
+    sid)
+      if [[ -n $rest && $rest != null ]]; then
+        SID=$rest
+        printf '%s' "$agent" >"$RT/sid.agent"
+        printf '%s' "$rest" >"$RT/sid"
+      fi
+      ;;
     mode) log "permission mode $rest" ;;
     tool)
       activity=${rest#*$'\t'}
@@ -528,7 +599,7 @@ cmd_open() {
   sid=$(cat "$RT/sid" 2>/dev/null)
   cd "$WORKDIR" 2>/dev/null || cd "$HOME"
   if [[ -n $sid ]]; then
-    open_agent "$(agent_name)" "$sid"
+    open_agent "$(cat "$RT/sid.agent" 2>/dev/null || echo claude)" "$sid"
   else
     exec omarchy-agent
   fi
