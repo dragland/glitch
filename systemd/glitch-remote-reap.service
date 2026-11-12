@@ -1,0 +1,6 @@
+[Unit]
+Description=glitch remote: restart the server once every session is idle
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/glitch _reap

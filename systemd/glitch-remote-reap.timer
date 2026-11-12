@@ -1,0 +1,8 @@
+[Unit]
+Description=glitch remote: check for idle sessions
+
+[Timer]
+OnCalendar=*:0/15
+
+[Install]
+WantedBy=timers.target

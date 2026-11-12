@@ -14,8 +14,8 @@ works.
 ## Install
 
 ```bash
-git clone git@github.com:dragland/glitch.git ~/Work/glitch
-~/Work/glitch/install.sh
+git clone git@github.com:dragland/glitch.git ~/glitch
+~/glitch/install.sh
 ```
 
 Needs Omarchy 4 with voxtype dictation (`omarchy-voxtype-install`) and Claude
@@ -41,7 +41,25 @@ the next Super+D continues that session.
 The agent runs the way `omarchy-agent` runs it (Claude in auto mode, Codex
 with `--approve-for-me`). When Claude would ask your permission, the orb asks
 out loud and Omarchy's menu offers Allow once / Deny; root goes through
-`pkexec`, so you get Omarchy's fingerprint or password dialog.
+`pkexec`, so you get Omarchy's fingerprint or password dialog. Claude gets Claude
+in Chrome, so it can use your signed-in Chrome (sign the extension into the
+same claude.ai account).
+
+### From your phone
+
+install.sh also runs Claude Code's remote control as a user service
+(`glitch-remote`), so this machine shows up in the Claude app and at
+claude.ai/code while you're logged in, and you can start sessions on it from
+there, as can your claude.ai projects. They run in `~/Work` with
+`bypassPermissions` and Claude in Chrome; change that with
+`systemctl --user edit glitch-remote`. Once every session has been quiet for an
+hour (`REMOTE_IDLE_MIN`), the server restarts to free them; the next message
+brings a session back with its context. Glitch's own voice
+turns are `claude -p` and don't appear there. The first install asks you to run
+`claude remote-control` once in `~/Work` to accept its prompts; `--no-remote`
+skips installing it. Turn on **Require trusted devices** at
+claude.ai/settings/account, since anyone signed into your account can drive
+these sessions.
 
 Settings and their defaults are in [config/glitch.conf](config/glitch.conf);
 override them in `~/.config/glitch/glitch.conf`. Your own `reactions.json` there
