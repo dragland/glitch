@@ -39,9 +39,11 @@ unlink_if_link "$CONFIG/hypr/glitch.lua"
 hyprctl reload >/dev/null 2>&1
 
 unlink_if_link "$HOME/.local/bin/glitch"
+systemctl --user disable --now ydotool.service >/dev/null 2>&1
+unlink_if_link "$HOME/.claude/rules/glitch-desktop.md"
 
 if [[ ${1:-} == --purge ]]; then
   rm -rf "$DATA" "$CONFIG/glitch"
   echo "    deleted ~/.local/share/glitch and ~/.config/glitch"
 fi
-echo "==> Done (voxtype settings were left as they are)"
+echo "==> Done (voxtype settings, the ydotool package and its /etc/udev and /etc/modules-load.d files were left as they are)"

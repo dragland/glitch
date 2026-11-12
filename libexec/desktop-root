@@ -1,0 +1,12 @@
+#!/bin/bash
+# Root half of install.sh's desktop control step (run through pkexec): ydotool,
+# and /dev/uinput for the user at the seat. uaccess sets an ACL for the active
+# session, so no group change or re-login; the rule sorts before 73-seat-late.
+set -euo pipefail
+pacman -S --needed --noconfirm ydotool
+echo uinput >/etc/modules-load.d/uinput.conf
+echo 'KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"' >/etc/udev/rules.d/70-uinput.rules
+udevadm control --reload-rules
+# /dev/uinput is a placeholder node until the module loads; loading it applies the rule.
+modprobe uinput
+udevadm trigger --action=change --subsystem-match=misc --sysname-match=uinput
