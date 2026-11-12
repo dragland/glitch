@@ -1,0 +1,561 @@
+#!/usr/bin/env python3
+"""glitch portal: the phone's way into the same voice companion (bin/glitch portal).
+
+    portal --addr IP --port N --rt RT --data DATA --glitch BIN --web DIR --plugin DIR
+           (--cert PEM --key PEM | --plain) [--max-seconds S]
+
+Phone turns write their channel to RT/phone (bin/glitch, GLITCH_PORTAL=phone):
+  events.jsonl   one JSON object per line, relayed as SSE events named by "type"
+                 (read from the start at launch, so a restart rebuilds hello):
+                   state    {state, reaction, detail}
+                   signal   {line}         an orb.events line (Glitch.qml), minus "say";
+                                           "turn" starts a phone turn, "rest" ends its work
+                   heard    {text}         a phone turn started on this text
+                   clip     {id, url, kind, ms, env, with, delay, approve}
+                   reply    {summary, body}
+                   approve  {id, label, ask, timeout}
+                   approved {id, answer}   allow|deny|none
+                   hush     {}
+  clips/<id>     the clips; clips/<id>.played (played|hushed) is written here and
+                 ends bin/glitch's wait for that clip
+  approve.<id>   the answer (allow|deny), written here
+  online         exists while a page holds /api/events
+  pair           {hash: sha256 of the code, expires, tries}, made by `glitch pair`
+RT/turn.portal   "<desk|phone> <pid>" while a turn runs
+DATA/portal/devices holds one "<sha256 of device key>\t<epoch>\t<user agent>" line per phone.
+
+Clips: kind is cue, say, ask or aside; ms its length; env the orb's "say" payload
+("<hz> <v>...") or null. A cue plays on arrival, over anything, like the desk's
+beeps. Speech (say, ask, aside) plays one clip at a time in arrival order, and
+the page POSTs /api/played {id} when each one ends: the turn waits for that
+(or for ms + 2 s, or not at all with no page connected), as the desk waits for
+its speaker, so the next state comes after the speech. A clip whose `with` is
+set starts `delay` ms after clip `with` started (the desk's contour cue leading
+into speech) instead of queueing, or at once if that moment has passed. An ask
+clip belongs to approval `approve`: it is dropped once that is answered, and
+the page stops it on `approved`. Speech that never played is in hello.replay.
+"""
+
+import argparse
+import hashlib
+import hmac
+import json
+import os
+import queue
+import re
+import secrets
+import socket
+import ssl
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlsplit
+
+COOKIE = "glitch_device"
+COOKIE_AGE = 34560000  # Chrome caps a cookie's lifetime at 400 days
+PUBLIC = {("GET", "/pair"), ("POST", "/api/pair")}
+AUDIO = {"audio/webm": "matroska", "video/webm": "matroska", "audio/ogg": "ogg", "audio/mp4": "mov",
+         "audio/wav": "wav", "audio/x-wav": "wav", "audio/wave": "wav"}
+CLIP = re.compile(r"[0-9]+-(cue|say|ask|aside)\.wav")
+SOUND = re.compile(r"[a-z]+\.wav")
+PLUGIN_FILES = {"orb.mjs", "orb.glsl"}
+SPEECH = {"say", "ask", "aside"}
+MAX_UPLOAD = 50 << 20
+MAX_CONNECTIONS = 32
+HEAD_SECONDS = 10
+PAIR_TRIES = 5
+TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript", ".mjs": "text/javascript",
+         ".css": "text/css", ".json": "application/json", ".svg": "image/svg+xml", ".png": "image/png",
+         ".wav": "audio/wav", ".glsl": "text/plain; charset=utf-8", ".webmanifest": "application/manifest+json",
+         ".woff2": "font/woff2", ".ico": "image/x-icon", ".txt": "text/plain; charset=utf-8"}
+
+PAIR_PAGE = b"""<!doctype html><meta name=viewport content="width=device-width"><title>glitch</title>
+<form id=f><input id=c inputmode=numeric autocomplete=one-time-code maxlength=6 placeholder="code" autofocus>
+<button>Pair</button></form><p id=m></p><script>
+f.onsubmit = async e => { e.preventDefault();
+  const r = await fetch("/api/pair", {method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({code: c.value})});
+  if (r.ok) location = "/"; else m.textContent = "That code didn't work. Say \\"pair my phone\\" for a new one."; };
+</script>"""
+
+
+def sha(s):
+    return hashlib.sha256(s.encode()).hexdigest()
+
+
+def read_json(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def write_atomic(path, text, mode=0o600):
+    tmp = f"{path}.{os.getpid()}.{threading.get_ident()}"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
+def frame(ev):
+    return f"event: {ev['type']}\ndata: {json.dumps(ev, separators=(',', ':'))}\n\n".encode()
+
+
+class Portal:
+    def __init__(self, a):
+        self.a = a
+        self.ph = os.path.join(a.rt, "phone")
+        self.devices_path = os.path.join(a.data, "portal", "devices")
+        self.host = f"{a.addr}:{a.port}"
+        self.scheme = "http" if a.plain else "https"
+        self.lock = threading.Lock()
+        self.clients = set()
+        self.state = self.heard = self.reply = None
+        self.unplayed = {}
+        self.pending = {}
+        self.devices = (None, set())
+        self.pos = 0
+
+    def log(self, msg):
+        print(f"{time.strftime('%T')} {msg}", file=sys.stderr, flush=True)
+
+    def path(self, *names):
+        return os.path.join(self.ph, *names)
+
+    def turn_portal(self):
+        try:
+            with open(os.path.join(self.a.rt, "turn.portal")) as f:
+                portal, pid = f.read().split()
+            os.kill(int(pid), 0)
+            return portal
+        except (OSError, ValueError):
+            return None
+
+    def device_hashes(self):
+        try:
+            mt = os.stat(self.devices_path).st_mtime_ns
+            if self.devices[0] != mt:
+                with open(self.devices_path) as f:
+                    self.devices = (mt, {ln.split("\t")[0] for ln in f if ln.strip()})
+        except OSError:
+            return set()
+        return self.devices[1]
+
+    def add_device(self, key_hash, agent):
+        os.makedirs(os.path.dirname(self.devices_path), mode=0o700, exist_ok=True)
+        try:
+            with open(self.devices_path) as f:
+                old = f.read()
+        except OSError:
+            old = ""
+        agent = re.sub(r"[\t\n\r]", " ", agent)[:160]
+        write_atomic(self.devices_path, old + f"{key_hash}\t{int(time.time())}\t{agent}\n")
+
+    def pair(self, code, agent):
+        path = self.path("pair")
+        with self.lock:
+            p = read_json(path)
+            if not p or p.get("expires", 0) < time.time():
+                if p:
+                    os.remove(path)
+                return None
+            if not hmac.compare_digest(sha(code), p.get("hash", "")):
+                p["tries"] = p.get("tries", 0) + 1
+                if p["tries"] >= PAIR_TRIES:
+                    os.remove(path)
+                    self.log("pairing voided after wrong codes")
+                else:
+                    write_atomic(path, json.dumps(p))
+                return None
+            os.remove(path)
+            key = secrets.token_urlsafe(32)
+            self.add_device(sha(key), agent)
+            self.log("paired a phone")
+            return key
+
+    def finish(self, ids, how):
+        for i in ids:
+            self.unplayed.pop(i, None)
+            if os.path.exists(self.path("clips", i)):
+                write_atomic(self.path("clips", i + ".played"), how)
+
+    def publish(self, ev):
+        t = ev["type"]
+        with self.lock:
+            if t == "signal" and ev.get("line") in ("turn", "rest"):
+                self.pending.clear()
+                if ev["line"] == "turn":
+                    self.unplayed.clear()
+            elif t == "clip":
+                if ev.get("approve") and ev["approve"] not in self.pending:
+                    return
+                ev["url"] = "/clips/" + ev.get("id", "")
+                if ev.get("kind") in SPEECH:
+                    self.unplayed[ev["id"]] = ev
+            elif t == "hush":
+                self.finish(list(self.unplayed), "hushed")
+            elif t == "state":
+                self.state = ev
+            elif t == "heard":
+                self.heard, self.reply = ev.get("text"), None
+            elif t == "reply":
+                self.reply = ev
+            elif t == "approve":
+                self.pending[ev.get("id")] = ev
+            elif t == "approved":
+                self.pending.pop(ev.get("id"), None)
+                self.finish([i for i, c in self.unplayed.items() if c.get("approve") == ev.get("id")], "hushed")
+            msg = frame(ev)
+            for q in list(self.clients):
+                try:
+                    q.put_nowait(msg)
+                except queue.Full:
+                    self.clients.discard(q)
+
+    def hello(self):
+        turn = self.turn_portal()
+        with self.lock:
+            replay = [c for c in self.unplayed.values()
+                      if os.path.exists(self.path("clips", c["id"])) and not os.path.exists(self.path("clips", c["id"] + ".played"))]
+            return {"type": "hello", "state": self.state, "turn": turn, "approve": list(self.pending.values()),
+                    "heard": self.heard, "reply": self.reply, "replay": replay}
+
+    def connect(self, q, on):
+        with self.lock:
+            if on:
+                self.clients.add(q)
+            else:
+                self.clients.discard(q)
+            if self.clients:
+                open(self.path("online"), "a").close()
+            elif os.path.exists(self.path("online")):
+                os.remove(self.path("online"))
+
+    def read_events(self, buf=b""):
+        path = self.path("events.jsonl")
+        try:
+            size = os.stat(path).st_size
+        except OSError:
+            size = 0
+        if size < self.pos:
+            self.pos, buf = 0, b""
+        if size == self.pos:
+            return buf
+        with open(path, "rb") as f:
+            f.seek(self.pos)
+            chunk = f.read(size - self.pos)
+        self.pos += len(chunk)
+        *lines, buf = (buf + chunk).split(b"\n")
+        for ln in lines:
+            try:
+                ev = json.loads(ln)
+            except ValueError:
+                continue
+            if isinstance(ev, dict) and isinstance(ev.get("type"), str):
+                self.publish(ev)
+        return buf
+
+    def tail(self, buf):
+        while True:
+            time.sleep(0.05)
+            buf = self.read_events(buf)
+
+    def glitch(self, *args, timeout=30):
+        env = dict(os.environ, GLITCH_PORTAL="phone")
+        return subprocess.run([self.a.glitch, *args], env=env, capture_output=True, text=True,
+                              timeout=timeout, stdin=subprocess.DEVNULL)
+
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    server_version = "glitch"
+    sys_version = ""
+    timeout = 60
+
+    @property
+    def p(self):
+        return self.server.portal
+
+    def log_message(self, fmt, *args):
+        pass
+
+    def handle_one_request(self):
+        self.head_timer = threading.Timer(HEAD_SECONDS, self.cut)
+        self.head_timer.start()
+        try:
+            super().handle_one_request()
+        finally:
+            self.head_timer.cancel()
+
+    def parse_request(self):
+        ok = super().parse_request()
+        self.head_timer.cancel()
+        return ok
+
+    def cut(self):
+        try:
+            # The raw socket's shutdown, not SSLSocket's: it wakes the blocked read in the handler's thread.
+            socket.socket.shutdown(self.connection, socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+    def send_response(self, code, message=None):
+        self.responded = True
+        super().send_response(code, message)
+
+    def do_GET(self):
+        self.route("GET")
+
+    def do_POST(self):
+        self.route("POST")
+
+    def route(self, method):
+        self.responded = self.body_read = False
+        try:
+            self.dispatch(method)
+        except (BrokenPipeError, ConnectionResetError, TimeoutError, ssl.SSLError):
+            self.close_connection = True
+        except Exception as e:
+            self.p.log(f"{method} {urlsplit(self.path).path}: {type(e).__name__}: {e}"[:300])
+            self.close_connection = True
+            if not self.responded:
+                self.send_json(400 if isinstance(e, ValueError) else 500, {"error": "request"})
+
+    def dispatch(self, method):
+        url = urlsplit(self.path)
+        path = url.path
+        if self.headers.get("Host") != self.p.host:
+            return self.send_json(421, {"error": "host"})
+        if method == "POST" and self.headers.get("Origin") != f"{self.p.scheme}://{self.p.host}":
+            return self.send_json(403, {"error": "origin"})
+        self.key = self.device_key()
+        if (method, path) not in PUBLIC and not self.key:
+            if method == "GET" and not path.startswith(("/api/", "/clips/")):
+                return self.send(303, b"", headers={"Location": "/pair"})
+            return self.send_json(401, {"error": "unpaired"})
+        if method == "POST":
+            fn = {"/api/pair": self.post_pair, "/api/talk": self.post_talk, "/api/approve": self.post_approve,
+                  "/api/cancel": self.post_cancel, "/api/played": self.post_played}.get(path)
+            return fn(parse_qs(url.query)) if fn else self.send_json(404, {"error": "not found"})
+        if path == "/api/events":
+            return self.events()
+        if path == "/pair":
+            return self.send(200, PAIR_PAGE, TYPES[".html"])
+        name = path.rsplit("/", 1)[-1]
+        if path == "/clips/" + name and CLIP.fullmatch(name):
+            return self.send_file(self.p.path("clips", name), cache="private, max-age=3600")
+        if path == "/sounds/" + name and SOUND.fullmatch(name):
+            return self.send_file(self.p.path("sounds", name), cache="private, max-age=3600")
+        if path == "/plugin/" + name and name in PLUGIN_FILES:
+            return self.send_file(os.path.join(self.p.a.plugin, name))
+        return self.static(path)
+
+    def device_key(self):
+        # By hand: SimpleCookie stops at the first cookie it can't parse, which may be another service's.
+        for part in self.headers.get("Cookie", "").split(";"):
+            name, _, value = part.strip().partition("=")
+            if name == COOKIE and value and sha(value) in self.p.device_hashes():
+                return value
+        return None
+
+    def cookie(self, key):
+        return {"Set-Cookie": f"{COOKIE}={key}; Path=/; Max-Age={COOKIE_AGE}; HttpOnly; Secure; SameSite=Strict"}
+
+    def body(self, limit):
+        n = int(self.headers.get("Content-Length") or 0)
+        if not 0 < n <= limit:
+            return None
+        data = self.rfile.read(n)
+        self.body_read = True
+        return data
+
+    def body_json(self):
+        data = self.body(4096)
+        try:
+            v = json.loads(data or b"")
+        except ValueError:
+            return {}
+        return v if isinstance(v, dict) else {}
+
+    def post_pair(self, q):
+        code = str(self.body_json().get("code", "")).strip()
+        key = re.fullmatch(r"[0-9]{6}", code) and self.p.pair(code, self.headers.get("User-Agent", ""))
+        if not key:
+            return self.send_json(403, {"error": "code"})
+        self.send_json(200, {"ok": True}, headers=self.cookie(key))
+
+    def post_talk(self, q):
+        fmt = AUDIO.get(self.headers.get("Content-Type", "").split(";")[0].strip().lower())
+        if not fmt:
+            return self.send_json(415, {"error": "audio type"})
+        data = self.body(MAX_UPLOAD)
+        if not data:
+            return self.send_json(413, {"error": "size"})
+        t0 = time.monotonic()
+        with tempfile.TemporaryDirectory(dir=self.p.ph) as d:
+            src, wav = os.path.join(d, "in"), os.path.join(d, "in.wav")
+            with open(src, "wb") as f:
+                f.write(data)
+            r = subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", "-f", fmt, "-i", src,
+                                "-t", str(self.p.a.max_seconds), "-vn", "-ar", "16000", "-ac", "1",
+                                "-c:a", "pcm_s16le", "-y", wav], capture_output=True, timeout=60)
+            if r.returncode or not os.path.isfile(wav):
+                self.p.log(f"ffmpeg: {r.stderr.decode(errors='replace').strip()[:300]}")
+                return self.send_json(422, {"error": "audio"})
+            ms = max(0, os.path.getsize(wav) - 44) * 1000 // 32000
+            t1 = time.monotonic()
+            r = subprocess.run(["voxtype", "-q", "transcribe", wav], capture_output=True, text=True,
+                               timeout=30 + 2 * ms / 1000)
+            if r.returncode:
+                self.p.log(f"voxtype: {r.stderr.strip()[-300:]}")
+                return self.send_json(500, {"error": "transcribe"})
+        text = " ".join(r.stdout.split("\n\n", 1)[1].split()) if "\n\n" in r.stdout else ""
+        t2 = time.monotonic()
+        self.p.log(f"heard {ms} ms of audio: convert {t1 - t0:.2f}s, transcribe {t2 - t1:.2f}s")
+        fresh = "true" if q.get("new") == ["1"] else "false"
+        out = self.p.glitch("_heard", text, fresh, str(ms)).stdout.split()
+        self.send_json(200, {"text": text, "outcome": out[-1] if out else "error",
+                             "transcribe_ms": int((t2 - t1) * 1000)})
+
+    def post_approve(self, q):
+        b = self.body_json()
+        ident = str(b.get("id", ""))
+        with self.p.lock:
+            if ident not in self.p.pending or not isinstance(b.get("allow"), bool):
+                return self.send_json(409, {"error": "stale"})
+            write_atomic(self.p.path(f"approve.{ident}"), "allow" if b["allow"] else "deny")
+        self.send_json(200, {"ok": True})
+
+    def post_cancel(self, q):
+        self.p.glitch("cancel")
+        self.send_json(200, {"ok": True})
+
+    def post_played(self, q):
+        ident = str(self.body_json().get("id", ""))
+        with self.p.lock:
+            if not ident:
+                self.p.finish(list(self.p.unplayed), "hushed")
+            elif CLIP.fullmatch(ident):
+                self.p.finish([ident], "played")
+        self.send_json(200, {"ok": True})
+
+    def events(self):
+        q = queue.Queue(maxsize=2000)
+        self.p.connect(q, True)
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(b"retry: 2000\n\n" + frame(self.p.hello()))
+            self.wfile.flush()
+            while True:
+                try:
+                    msg = q.get(timeout=15)
+                except queue.Empty:
+                    msg = b": ping\n\n"
+                if q not in self.p.clients or not self.device_key():
+                    return
+                self.wfile.write(msg)
+                self.wfile.flush()
+        finally:
+            self.p.connect(q, False)
+
+    def static(self, path):
+        root = os.path.realpath(self.p.a.web)
+        rel = "index.html" if path == "/" else path.lstrip("/")
+        f = os.path.realpath(os.path.join(root, rel))
+        if not f.startswith(root + os.sep) or not os.path.isfile(f):
+            return self.send_json(404, {"error": "not found"})
+        self.send_file(f, headers=self.cookie(self.key) if f.endswith(".html") else None)
+
+    def send_file(self, f, cache="no-cache", headers=None):
+        try:
+            with open(f, "rb") as fh:
+                data = fh.read()
+        except OSError:
+            return self.send_json(404, {"error": "not found"})
+        self.send(200, data, TYPES.get(os.path.splitext(f)[1], "application/octet-stream"),
+                  {"Cache-Control": cache, **(headers or {})})
+
+    def send_json(self, code, obj, headers=None):
+        self.send(code, json.dumps(obj).encode(), "application/json", headers)
+
+    def send(self, code, data, ctype="text/plain", headers=None):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Frame-Options", "DENY")
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
+        if not self.body_read and (self.headers.get("Content-Length", "").strip() not in ("", "0")
+                                   or "Transfer-Encoding" in self.headers):
+            self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(data)
+
+
+class Server(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
+
+    def process_request(self, request, client_address):
+        if not self.slots.acquire(blocking=False):
+            return self.shutdown_request(request)
+        super().process_request(request, client_address)
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.slots.release()
+
+    def handle_error(self, request, client_address):
+        self.portal.log(f"{client_address[0]}: {sys.exc_info()[1]!r}"[:200])
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    for k in ("addr", "rt", "data", "glitch", "web", "plugin"):
+        ap.add_argument("--" + k, required=True)
+    ap.add_argument("--port", type=int, default=8443)
+    ap.add_argument("--cert")
+    ap.add_argument("--key")
+    ap.add_argument("--plain", action="store_true")
+    ap.add_argument("--max-seconds", type=int, default=600)
+    a = ap.parse_args()
+    if not a.plain and not (a.cert and a.key):
+        ap.error("--cert and --key, or --plain")
+    portal = Portal(a)
+    os.makedirs(portal.path("clips"), exist_ok=True)
+    if os.path.exists(portal.path("online")):
+        os.remove(portal.path("online"))
+    buf = portal.read_events()
+    try:
+        srv = Server((a.addr, a.port), Handler)
+        if not a.plain:
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+            ctx.load_cert_chain(a.cert, a.key)
+            srv.socket = ctx.wrap_socket(srv.socket, server_side=True, do_handshake_on_connect=False)
+    except (OSError, ssl.SSLError) as e:
+        sys.exit(f"glitch portal: {a.addr}:{a.port}: {e}")
+    srv.portal = portal
+    threading.Thread(target=portal.tail, args=(buf,), daemon=True).start()
+    portal.log(f"portal on {portal.scheme}://{portal.host}")
+    srv.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

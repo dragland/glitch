@@ -1,0 +1,18 @@
+[Unit]
+Description=glitch portal: the phone page (HTTPS on the LAN) for the same voice companion
+# In the graphical session, so its turns get WAYLAND_DISPLAY and the session's PATH (mise's claude)
+PartOf=graphical-session.target
+After=graphical-session.target
+ConditionEnvironment=WAYLAND_DISPLAY
+
+[Service]
+ExecStart=%h/.local/bin/glitch portal
+# Turns run detached in this cgroup: a restart must not kill one mid-reply.
+KillMode=process
+Restart=on-failure
+RestartSec=5
+# glitch portal exits 78 when PORTAL_ADDR or the certificate is missing.
+RestartPreventExitStatus=78
+
+[Install]
+WantedBy=graphical-session.target
