@@ -78,6 +78,11 @@ orb_set() {
 # docstring lists the types).
 phone_send() { printf '%s\n' "$1" >>"$PH/events.jsonl"; }
 
+page_online() {
+  local pid
+  { read -r pid <"$PH/online"; } 2>/dev/null && kill -0 "$pid" 2>/dev/null
+}
+
 # kind id [env [with-id lead-seconds]]; CLIP and CLIP_MS name the clip sent.
 clip_sent() {
   CLIP=$2
@@ -185,7 +190,7 @@ play() {
     id="${EPOCHREALTIME/./}-${name%%.*}.wav"
     cp "$1" "$PH/clips/$id" && clip_sent "${name%%.*}" "$id" "$(cat "${1%.wav}.env" 2>/dev/null)" "${2:-}" "${3:-}" || return 0
     end=$((${EPOCHREALTIME/./} + (CLIP_MS + 2000) * 1000))
-    while [[ -e $PH/online && ! -e $PH/clips/$id.played ]] && ((${EPOCHREALTIME/./} < end)); do sleep 0.1; done
+    while page_online && [[ ! -e $PH/clips/$id.played ]] && ((${EPOCHREALTIME/./} < end)); do sleep 0.1; done
     [[ $(cat "$PH/clips/$id.played" 2>/dev/null) != hushed ]]
     return
   fi
@@ -545,16 +550,8 @@ heard() {
     echo "$cmd"
     return
   fi
-  if [[ -z $text ]]; then
-    forget_session
-    REACTION=$(reaction mood.calm) set_state done "fresh session"
-    REACTION=$(reaction mood.calm) cue --beeps 2
-    echo fresh
-    return
-  fi
-
   setsid "$0" _turn "$text" "$fresh" "$speech" </dev/null >/dev/null 2>&1 8>&- &
-  echo turn
+  if [[ -z $text ]]; then echo fresh; else echo turn; fi
 }
 
 cmd_turn() {
@@ -562,6 +559,13 @@ cmd_turn() {
   local failed="" exit_code="" replied=false body words="" activity="" last_decide=0 fin
   local tcat id window contour lead=0.4
   exec 9>"$RT/turn.lock"
+  if [[ -z $text ]]; then
+    flock 9
+    forget_session
+    REACTION=$(reaction mood.calm) set_state done "fresh session"
+    REACTION=$(reaction mood.calm) cue --beeps 2
+    return
+  fi
   if ! flock -n 9; then
     set_state thinking "waiting for the last request"
     flock 9
@@ -743,7 +747,6 @@ cmd_open() {
 
 cmd_approve() {
   local in label ask pick before
-  APPROVE_ID=${EPOCHREALTIME/./}$$
   in=$(cat)
   label=$(jq -r '.tool_name + ": " + ((.tool_input.command // .tool_input.file_path // .tool_input.url // .tool_input.description // (.tool_input | tostring)) | tostring | split("\n")[0] | .[0:110])' <<<"$in" 2>/dev/null)
   case $(jq -r .tool_name <<<"$in" 2>/dev/null) in
@@ -757,6 +760,7 @@ cmd_approve() {
   REACTION=$(reaction needs_you)
   set_state needs_you "$label"
   cue
+  APPROVE_ID=${EPOCHREALTIME/./}$$
   (speech_warm "ask.$APPROVE_ID" && speech_render "$ask" && play "$SPEAK_SLOT.wav"; rm -f "$SPEAK_SLOT".*) </dev/null >/dev/null 2>&1 &
   if [[ $PORTAL == phone ]]; then
     pick=$(phone_approve "$label" "$ask")
@@ -785,7 +789,7 @@ phone_approve() {
   json=$(jq -cn --arg id "$APPROVE_ID" --arg label "$1" --arg ask "$2" --argjson t "$PORTAL_APPROVE_TIMEOUT" \
     '{type:"approve", id:$id, label:$label, ask:$ask, timeout:$t}')
   phone_send "$json"
-  while ((EPOCHSECONDS < end)) && [[ ! -s $PH/approve.$APPROVE_ID ]]; do sleep 0.2; done
+  while ((EPOCHSECONDS <= end)) && [[ ! -s $PH/approve.$APPROVE_ID ]]; do sleep 0.2; done
   answer=$(cat "$PH/approve.$APPROVE_ID" 2>/dev/null)
   rm -f "$PH/approve.$APPROVE_ID"
   phone_send "$(jq -cn --arg id "$APPROVE_ID" --arg a "${answer:-none}" '{type:"approved", id:$id, answer:$a}')"
@@ -812,6 +816,8 @@ cmd_cancel() {
     for _ in 1 2 3 4 5 6; do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
     pkill -TERM -s "$pid" 2>/dev/null
     rm -f "$RT/cancel.$pid"
+    exec 9>"$RT/turn.lock"
+    flock -w 2 9 || return 0
     PORTAL=${owner:-$PORTAL} ev rest
   fi
   if [[ -n $owner && $owner != "$PORTAL" ]]; then
@@ -920,7 +926,7 @@ _expire) close_card ;;
 _approve) cmd_approve ;;
 _reap) cmd_reap ;;
 open) cmd_open ;;
-new) forget_session; REACTION=$(reaction mood.calm) set_state done "fresh session" ;;
+new) cmd_turn "" true ;;
 cancel) cmd_cancel ;;
 hush) hush ;;
 say)
