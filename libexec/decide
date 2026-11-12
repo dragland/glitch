@@ -223,7 +223,6 @@ def main():
         return 1
     context = describe(ev)
     working = ev.get("phase") == "working"
-    # clear is one designed look: the table's reaction stands.
     if not working and ev.get("mood") == "clear" and not ev.get("failed"):
         return 0
     deadline = time.monotonic() + float(ev.get("deadline", 3))
@@ -269,8 +268,6 @@ def main():
 
     energy = round((expect("energy", 3) - 1) / 4, 2)  # 1..5 -> 0..1
     last = ((ev.get("history") or [{}])[-1].get("reaction") or {})
-    # The mood carries over as the palette, unless the last look was a designed
-    # one (clear's mint), which is never shown with another pattern.
     carried = last.get("palette")
     if carried not in [o for o, _ in QUESTIONS["palette"][1]]:
         carried = "ocean"

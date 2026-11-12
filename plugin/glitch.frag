@@ -46,9 +46,9 @@ layout(std140, binding = 0) uniform buf {
     float ring;        // excited: ping ring progress 0..1 (0 = off)
 };
 
-const float GLOBE = 0.75;  // share of a true sphere's foreshortening
-const float LIMB = 0.22;   // outer share of the radius where the pattern thins out
-const float MOAT = 0.55;   // how much the pattern calms in a ring around the pupil
+const float GLOBE = 0.75;
+const float LIMB = 0.22;
+const float MOAT = 0.55;
 const float TAU = 6.2831853;
 
 vec4 over(vec4 top, vec4 under) { return top + under * (1.0 - top.a); }
@@ -69,7 +69,6 @@ float turbulence(vec2 p) {
     return v / 0.875;
 }
 
-// Two dot lattices, the second offset by half a period.
 vec4 dots(vec2 p, float period, float r) {
     float h = period * 0.5;
     float d1 = length(mod(p, period) - h);
@@ -78,7 +77,6 @@ vec4 dots(vec2 p, float period, float r) {
                 pm(secondary, 1.0 - up(d2, r - aa * 0.5, r + aa * 0.5)));
 }
 
-// Jev's wave band: a soft ramp up to a crisp crest, alternating the two colours.
 vec4 bands(float v) {
     float m = mod(v, 40.0);
     float a1 = (m < 10.0) ? m / 10.0 : (m < 11.0 ? 11.0 - m : 0.0);
@@ -86,19 +84,14 @@ vec4 bands(float v) {
     return over(pm(primary, a1), pm(secondary, a2));
 }
 
-// q: texture space centred on the gaze point, with drift; q0: the same without
-// drift, for what must stay put (rings on the eye, the waves' arcs, the noise
-// gradient). Only the lattices drift.
 vec4 patternColor(int pat, vec2 q, vec2 q0, float R) {
     if (pat == 0) {
-        // repeating-radial-gradient: primary 14-16px, secondary 29-31px, period 42px.
         float m = mod(length(q0) + ringPhase, 42.0);
         float a1 = up(m, 13.0, 14.0) * (1.0 - up(m, 16.0, 17.0));
         float a2 = up(m, 28.0, 29.0) * (1.0 - up(m, 31.0, 32.0));
         return over(pm(primary, a1), pm(secondary, a2));
     }
     if (pat == 1) {
-        // Checker, 14px cells. While editing, cells fill in as `reveal` grows.
         vec2 p = q + 7.0;
         vec2 t = mod(p, 28.0) - 14.0;
         vec3 rgb = (t.x * t.y < 0.0) ? primary.rgb : secondary.rgb;
@@ -110,7 +103,6 @@ vec4 patternColor(int pat, vec2 q, vec2 q0, float R) {
         return vec4(rgb * a, a);
     }
     if (pat == 2) {
-        // Waves: halfway between Jev's corner arcs and swells that roll through.
         vec2 p = q0 + R;
         float und = 9.0 * sin(q0.x * 0.045 + swellPhase) + 4.0 * sin(q0.x * 0.11 - 2.0 * swellPhase + q0.y * 0.02);
         return bands(0.5 * length(p) + 0.5 * (p.y + und) + 0.25 * und + swellDrift);
@@ -127,23 +119,19 @@ vec4 patternColor(int pat, vec2 q, vec2 q0, float R) {
         float g = clamp(dot(q0 / (2.0 * R), vec2(0.70710678)) * 0.70710678 + 0.5, 0.0, 1.0);
         return vec4(mix(primary.rgb, secondary.rgb, g) * turbulence(q + R), 1.0);
     }
-    // fine: the dot lattice at 60% size and 40% strength.
     return dots(q + 6.0, 12.0, 1.55) * 0.4;
 }
 
 void main() {
-    vec2 c = qt_TexCoord0 * itemPx - vec2(itemPx * 0.5);  // CSS px from centre
+    vec2 c = qt_TexCoord0 * itemPx - vec2(itemPx * 0.5);
     float R = diameter * 0.5;
     float d = length(c);
     float ang = atan(c.y, c.x);
 
-    // Rim give: the silhouette moves a little with the voice.
     float dn = d / (1.0 + wobble * (1.3 * cos(2.0 * ang + wobblePhase * 3.1) + cos(3.0 * ang - wobblePhase * 5.3)));
 
-    // Outer glow (box-shadow 0 0 blur color2).
     float sigma = max(glowBlur * 0.5, 1.0);
     float outside = max(dn - R, 0.0);
-    // Fade the glow out before the item's edge, or a wide halo shows a square.
     float room = 1.0 - up(d, itemPx * 0.5 - 70.0, itemPx * 0.5 - 2.0);
     vec4 col = pm(secondary, glowAlpha * room * exp(-0.5 * (outside * outside) / (sigma * sigma)));
 
@@ -153,7 +141,6 @@ void main() {
         float w = 4.0 * (1.0 + ring);
         col = over(vec4((1.0 - up(abs(d - rr), w * 0.5 - aa, w * 0.5)) * 0.2 * (1.0 - ring)), col);
     }
-    // Pings: one per voice onset (out when it speaks, in when you do) or returning moon.
     for (int i = 0; i < 4; i++) {
         float u = pings[i];
         if (u <= 0.0) continue;
@@ -164,13 +151,11 @@ void main() {
 
     float inside = 1.0 - up(dn, R - aa - 4.0, R);
     if (inside > 0.0) {
-        // Globe: foreshorten toward the rim, with no lighting.
         float r = clamp(dn / R, 0.0, 0.9995);
         float k = r / max(d, 1e-3);
         float nz = sqrt(1.0 - r * r);
         vec2 t = c + (vec2(atan(c.x * k, nz), asin(clamp(c.y * k, -1.0, 1.0))) * R - c) * GLOBE;
 
-        // The eye: centre texture space on the gaze point and magnify around it.
         vec2 f = t - eye;
         float fr2 = dot(f, f);
         vec2 q0 = f * (1.0 - lens * exp(-fr2 / (lensSize * lensSize)));
@@ -184,7 +169,6 @@ void main() {
 
         vec4 body = over(A, pm(bg, 0.9));
 
-        // Context tide: a faint level inside the body.
         if (tide > 0.0 && tideShow > 0.0) {
             float level = R - 2.0 * R * tide + 3.0 * sin(t.x * 0.07 + tidePhase * 2.2) + 1.5 * sin(t.x * 0.16 - tidePhase * 3.1);
             body = over(pm(primary, 0.10 * tideShow * clamp((t.y - level) / (2.0 * aa) + 0.5, 0.0, 1.0)), body);
@@ -192,22 +176,18 @@ void main() {
             body = over(vec4(0.275 * tideShow * exp(-0.5 * ld * ld)), body);
         }
 
-        // Inset glow, then the glow at the gaze point.
         float edge = R - dn;
         body = over(pm(secondary, 0.25 * exp(-0.5 * (edge * edge) / 400.0)), body);
         float gs = lensSize * 0.8;
         body.rgb += primary.rgb * eyeGlow * exp(-fr2 / (gs * gs));
 
-        // Look: a radar sweep with a fading trail.
         if (radar > 0.0)
             body.rgb += primary.rgb * exp(-mod(radarAngle - ang, TAU) / 0.8) * radar * (1.0 - up(dn, R - 3.0, R - 2.0));
 
-        // A soft rim that continues into the outer glow; it flashes on an edit.
         vec4 rim = vec4(mix(secondary.rgb, vec3(1.0), 0.8 * flash), secondary.a);
         float rd = (R - dn) / 4.5;
         body = over(pm(rim, 0.55 * exp(-0.5 * rd * rd)), body);
 
-        // A tool is out: a comet runs the rim until it returns.
         if (comet > 0.0) {
             float cd = (dn - R + 1.0) / 2.6;
             float m = exp(-mod(cometAngle - ang, TAU) / 1.1) * exp(-0.5 * cd * cd) * comet;

@@ -72,8 +72,7 @@ def one_pole(x, cutoff, high=False):
 
 
 def syllable(voice, base, energy, mood, exact=False):
-    """ZA(): one beep. Returns samples (already includes the trailing 50 ms).
-    `exact` plays `base` as given, with none of the random pitch rolls."""
+    """ZA(): one beep. Returns samples (already includes the trailing 50 ms)."""
     h = base * (0.8 + random.random() * 0.4)
     if voice == "robot" or exact:
         h = base
@@ -141,9 +140,9 @@ def syllable(voice, base, energy, mood, exact=False):
 
 
 CONTOURS = {
-    "arch": lambda x: 0.9 + 0.45 * math.sin(math.pi * 0.8 * x),  # rises, then settles a little above where it began
-    "rise": lambda x: 0.9 + 0.5 * x,                             # a question
-    "fall": lambda x: 1.15 - 0.35 * x,                           # bad news
+    "arch": lambda x: 0.9 + 0.45 * math.sin(math.pi * 0.8 * x),
+    "rise": lambda x: 0.9 + 0.5 * x,
+    "fall": lambda x: 1.15 - 0.35 * x,
 }
 
 
