@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0a0b0e">
+<meta name="color-scheme" content="dark">
+<title>glitch</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon-192.png">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0a0b0e; color: #6b7079;
+    font: 15px/1.45 system-ui, sans-serif; -webkit-tap-highlight-color: transparent;
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; touch-action: none }
+  #text { position: fixed; left: 0; right: 0; top: calc(42dvh + min(31vw, 23dvh)); padding: 0 32px;
+    text-align: center; pointer-events: none; transition: opacity .3s }
+  #text.body { pointer-events: auto }
+  #text.dim { opacity: .35 }
+  #text p { margin: 0 auto; max-width: 30em; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical }
+  #heard { -webkit-line-clamp: 1; line-clamp: 1 }
+  #line { -webkit-line-clamp: 2; line-clamp: 2; color: #aab0b9; margin-top: 4px }
+  #body { position: fixed; left: 20px; right: 20px; bottom: calc(24px + env(safe-area-inset-bottom)); max-height: 38dvh;
+    overflow: auto; margin: 0 auto; max-width: 34em; white-space: pre-wrap; font-size: 13px; color: #8a8f98;
+    user-select: text; -webkit-user-select: text }
+  #ask { position: fixed; left: 0; right: 0; bottom: calc(36px + env(safe-area-inset-bottom)); text-align: center; padding: 0 24px }
+  #label { margin: 0 auto 18px; max-width: 30em; color: #c4c8cf; font: 13px/1.4 ui-monospace, monospace;
+    overflow-wrap: anywhere; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3 }
+  button { font: inherit; color: #d8dbe0; background: none; border: 1px solid #2a2d33; border-radius: 99px;
+    padding: 12px 0; width: 9.5em; margin: 0 5px }
+  button:active { background: #16181d }
+  button:disabled { opacity: .4 }
+  #cancel { position: fixed; top: env(safe-area-inset-top); right: 0; width: auto; border: 0; margin: 0;
+    padding: 18px 20px; font-size: 13px; color: #50545c }
+  [hidden] { display: none !important }
+</style>
+<canvas id="orb"></canvas>
+<div id="text"><p id="heard"></p><p id="line"></p></div>
+<div id="body" hidden></div>
+<div id="ask" hidden><p id="label"></p><button id="allow">Allow once</button><button id="deny">Deny</button></div>
+<button id="cancel" hidden>cancel</button>
+<script type="module" src="/app.js"></script>
+</html>
