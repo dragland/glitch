@@ -26,7 +26,6 @@ omarchy-shell -q shell rescanPlugins >/dev/null 2>&1
 hypr="$CONFIG/hypr/hyprland.lua"
 if grep -q 'require("hypr.glitch")' "$hypr" 2>/dev/null; then
   cp "$hypr" "$hypr.bak.$(date +%s)"
-  # The installer appended a blank line, a comment and the require.
   sed -i -z 's/\n\n-- glitch voice companion[^\n]*\nrequire("hypr.glitch")\n/\n/' "$hypr"
   sed -i '/^-- glitch voice companion/d; /^require("hypr.glitch")$/d' "$hypr"
   echo "    removed require(\"hypr.glitch\") from ~/.config/hypr/hyprland.lua"

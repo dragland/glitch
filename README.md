@@ -107,12 +107,11 @@ Super+D ─► voxtype (local Whisper) ─► transcript ─► agent, headless,
   `reactions.json`), `desktop-root` (desktop control's root half).
 - `config/`: defaults, including the SAY/MOOD convention in `voice-prompt.md`.
 
-install.sh symlinks the code into `~/.local/bin`, `~/.config/hypr` (plus one
-`require` line in `hyprland.lua`), `~/.config/omarchy/plugins`,
-`~/.config/systemd/user` and `~/.claude/rules`, installs ydotool with access to
-`/dev/uinput` (as root), and raises voxtype's recording cap (skip that with
-`--no-voxtype`, then set `RECORD_LIMIT` to voxtype's own cap). Working on
-glitch itself: see AGENTS.md.
+install.sh symlinks the code into place, adds one `require` line to
+`~/.config/hypr/hyprland.lua`, installs ydotool with access to `/dev/uinput`
+(as root), and raises voxtype's recording cap (skip that with `--no-voxtype`,
+then set `RECORD_LIMIT` to voxtype's own cap). To work on glitch itself, read
+AGENTS.md.
 
 ## Credits
 

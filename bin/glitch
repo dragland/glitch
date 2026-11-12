@@ -35,22 +35,17 @@ CUE="$GLITCH_HOME/libexec/cue"
 DECIDE="$GLITCH_HOME/libexec/decide"
 SPEAK_HELPER="$GLITCH_HOME/libexec/speak"
 
-# Locks: key.lock (fd 8) serializes key presses, turn.lock (fd 9) serializes
-# turns. Every detached child closes both (`8>&- 9>&-`), or it would keep the
-# lock and every later press would log "key ignored: busy".
+# Every detached child closes fds 8 (key.lock) and 9 (turn.lock): an inherited
+# fd keeps the flock held after its owner exits.
 
-# Keep the log short; it lives in tmpfs.
 if [[ -f $RT/glitch.log ]] && (($(wc -l <"$RT/glitch.log") > 2000)); then
   tail -n 1000 "$RT/glitch.log" >"$RT/glitch.log.tmp" && mv "$RT/glitch.log.tmp" "$RT/glitch.log"
 fi
 
 log() { printf '%(%T)T.%s %s\n' -1 "${EPOCHREALTIME:11:3}" "$*" >>"$RT/glitch.log"; }
 
-# Write $2 to $1 so concurrent readers never see a half-written file.
 write_atomic() { printf '%s\n' "$2" >"$1.$$" && mv "$1.$$" "$1"; }
 
-# Publish the orb state: state.json for readers, IPC so the orb updates now.
-# `detail` only goes to the log.
 set_state() {
   local json
   json=$(jq -cn --arg s "$1" --argjson reaction "${REACTION:-null}" '{state:$s, reaction:$reaction}')
@@ -63,8 +58,6 @@ set_state() {
 # orb tails, because IPC costs a process per call.
 ev() { printf '%s\n' "$*" >>"$RT/orb.events"; }
 
-# The current session id, if it's fresh and belongs to agent $1 (sid.agent):
-# switching agents starts a new session rather than resuming a foreign id.
 current_sid() {
   local f="$RT/sid"
   [[ -s $f && $(cat "$RT/sid.agent" 2>/dev/null) == "$1" ]] || return 1
@@ -77,9 +70,6 @@ forget_session() {
   close_card
 }
 
-# Beep Jev style reaction for a state or mood: the repo's reactions.json with
-# the user's copy (if any) merged over it.
-#   reaction listening | reaction tool.look | reaction mood.happy
 reaction() {
   local files=("$GLITCH_HOME/config/reactions.json")
   [[ -f $USER_CONF/reactions.json ]] && files+=("$USER_CONF/reactions.json")
@@ -90,16 +80,12 @@ voice_prompt() {
   if [[ -f $USER_CONF/voice-prompt.md ]]; then cat "$USER_CONF/voice-prompt.md"; else cat "$GLITCH_HOME/config/voice-prompt.md"; fi
 }
 
-# Beep phrase for the current reaction (see libexec/cue). Fire and forget;
-# --beeps N plays a short tick instead of a full phrase.
 cue() {
   [[ $BEEPS == 1 && -x $PY && ${REACTION:-null} != null ]] || return 0
   setsid "$PY" -I "$CUE" "$@" "$REACTION" </dev/null >/dev/null 2>>"$RT/glitch.log" 8>&- 9>&- &
 }
 
 # --- speech -------------------------------------------------------------------
-# A turn warms Piper up front (libexec/speak loads the voice while the agent
-# works), then says one line through a FIFO when the reply arrives.
 
 speech_warm() {
   SPEAK_SLOT="$RT/${1:-say}"
@@ -110,7 +96,6 @@ speech_warm() {
   SPEAK_PID=$!
 }
 
-# Hand the warm voice its line and wait for the audio file.
 speech_render() {
   [[ -n ${SPEAK_PID:-} ]] || return 0
   timeout 5 bash -c 'printf "%s" "$1" >"$2"' _ "$1" "$SPEAK_SLOT.fifo" 2>/dev/null
@@ -120,7 +105,6 @@ speech_render() {
   SPEAK_PID=""
 }
 
-# Play a rendered file; `glitch hush` (or any key press) stops it.
 play() {
   local rc
   [[ -s $1 ]] || return 0
@@ -141,11 +125,7 @@ hush() {
 }
 
 # --- the reply card -------------------------------------------------------------
-# One sticky card stands for the live session. Critical is the only urgency the
-# Omarchy shell keeps on screen; re-sending with the card's id updates it in
-# place. It closes when the resume window runs out or a new session starts.
 
-# Escape for the card body, which the shell renders as StyledText.
 markup_escape() {
   local s=${1//&/&amp;}
   s=${s//</&lt;}
@@ -166,9 +146,6 @@ notify() {
 close_card() {
   local summary
   summary=$(cat "$RT/notify.summary" 2>/dev/null) || return 0
-  # The shell ignores D-Bus CloseNotification for on-screen cards; its own IPC
-  # dismisses every card whose summary *contains* the text, from any app, so
-  # summaries are always the (long, specific) SAY line or "glitch: …".
   [[ -n $summary ]] && omarchy-shell -q notifications dismiss "$summary" >/dev/null 2>&1
   rm -f "$RT/notify.id" "$RT/notify.summary"
 }
@@ -182,7 +159,6 @@ expire_later() {
 
 # --- live reactions (the local decision model, see libexec/decide) --------------
 
-# This session's last HISTORY_TURNS turns, for continuity between reactions.
 recent_history() {
   if ((HISTORY_TURNS > 0)) && [[ -s $RT/history.jsonl ]]; then
     jq -cs --arg sid "${1:-}" --argjson n "$HISTORY_TURNS" '[.[] | select(.sid == $sid)] | .[-$n:]' "$RT/history.jsonl"
@@ -191,8 +167,6 @@ recent_history() {
   fi
 }
 
-# Queue a decision about what's happening right now; the newest request wins
-# and a single worker keeps at most one in flight.
 live_decide() {
   [[ -x $PY ]] || return 0
   write_atomic "$RT/live.in" "$(jq -cn --arg user "$1" --arg activity "$2" --arg words "$3" \
@@ -220,7 +194,6 @@ cmd_live() {
     omarchy-shell -q glitch set "$(jq -c --argjson r "$r" '.reaction = $r' <<<"$state")" >/dev/null 2>&1
   done
   exec 7>&-
-  # A request that landed after the last check would otherwise be stranded.
   [[ -e $RT/live.in ]] && exec "$0" _live
 }
 
@@ -244,8 +217,8 @@ stop_live() {
 
 adapter_claude() {
   local sid=${1:-} args
-  # Like typing into Claude: auto mode decides, and anything it would ask you
-  # about goes to `glitch _approve` (nothing else can answer in -p mode).
+  # Nothing can answer a permission prompt in -p mode, so the hook sends each
+  # one to `glitch _approve`.
   local hook
   hook=$(jq -cn --arg cmd "$GLITCH_HOME/bin/glitch _approve" \
     '{hooks: {PermissionRequest: [{matcher: "*", hooks: [{type: "command", command: $cmd, timeout: 75}]}]}}')
@@ -356,10 +329,8 @@ adapter_codex() {
   echo "exit ${PIPESTATUS[0]}"
 }
 
-# glitch follows Omarchy's default agent where it has an adapter for it, and
-# uses Claude Code otherwise.
 agent_name() {
-  local agent=${GLITCH_AGENT:-} # override for testing
+  local agent=${GLITCH_AGENT:-}
   [[ -n $agent ]] || agent=$(omarchy-default-agent 2>/dev/null)
   case "$agent" in
   claude | codex) echo "$agent" ;;
@@ -370,7 +341,6 @@ agent_name() {
 
 run_agent() { "adapter_$1" "$2"; }
 
-# Take over in the agent's own TUI, with the same permission mode Omarchy uses.
 open_agent() {
   case "$1" in
   codex) exec omarchy-launch-tui --app-id=org.omarchy.agent codex resume --approve-for-me "$2" ;;
@@ -380,10 +350,7 @@ open_agent() {
 
 # --- commands -----------------------------------------------------------------------
 
-# Tap to start, tap again to send. Every key press funnels through here under
-# key.lock, so a press that lands while the last one is still transcribing is
-# dropped instead of desyncing the orb from voxtype. The 300 ms window absorbs
-# a key event delivered twice.
+# A key event can be delivered twice; the 300 ms window drops the repeat.
 cmd_toggle() {
   local now last
   exec 8>"$RT/key.lock"
@@ -398,7 +365,6 @@ cmd_toggle() {
     log "key ignored: bounce"
     return
   fi
-  # A press while glitch is talking just quiets it.
   if hush; then
     REACTION=$(reaction listening) set_state done "hushed"
     return
@@ -424,7 +390,7 @@ cmd_start() {
   REACTION=$(reaction listening)
   set_state listening
   cue --notes 440,587
-  # Watchdog: a forgotten recording sends itself just before voxtype's own cap.
+  # voxtype cuts a recording at its cap, so send just before it.
   setsid bash -c "sleep $((RECORD_LIMIT - 10)); [[ \$(cat '$RT/recording' 2>/dev/null) == $stamp ]] && exec '$0' stop" \
     </dev/null >/dev/null 2>&1 8>&- 9>&- &
 }
@@ -434,7 +400,6 @@ cmd_stop() {
   mv "$RT/recording" "$RT/recording.$$" 2>/dev/null || return 0
   started=$(cat "$RT/recording.$$")
   rm -f "$RT/recording.$$"
-  # Start and stop within 0.4 s is a slip, not a request.
   if ((${EPOCHREALTIME/./} - started < 400000)); then
     voxtype record cancel >/dev/null 2>&1
     rm -f "$RT/force-new"
@@ -449,7 +414,6 @@ cmd_stop() {
   text=$(tr '\n' ' ' 2>/dev/null <"$RT/utterance.txt" | sed 's/^ *//;s/ *$//')
   rm -f "$RT/utterance.txt"
   log "stop rc=$rc out=$out text=$text"
-  # How long and how fast you talked: the voice version of Beep Jev's typing speed.
   jq -cn --argjson ms "$(((${EPOCHREALTIME/./} - started) / 1000))" --argjson words "$(wc -w <<<"$text")" \
     '($ms / 1000) as $s | {seconds: ($s * 10 | round / 10), wps: (if $s > 0 then $words / $s * 10 | round / 10 else 0 end)}' \
     >"$RT/speech.json" 2>/dev/null
@@ -465,7 +429,6 @@ cmd_stop() {
     return
   fi
 
-  # "new task, ..." / "new chat" starts fresh; the rest of the sentence is the prompt.
   shopt -s nocasematch
   if [[ $text =~ ^(start\ a\ )?new\ (task|chat|session|conversation)[[:punct:]]*\ *(.*)$ ]]; then
     touch "$RT/force-new"
@@ -484,7 +447,6 @@ cmd_stop() {
     return
   fi
 
-  # Run the turn detached so the keybinding (and key.lock) returns immediately.
   setsid "$0" _turn "$text" "$fresh" </dev/null >/dev/null 2>&1 8>&- &
 }
 
@@ -529,8 +491,6 @@ cmd_turn() {
     mode) log "permission mode $rest" ;;
     tool)
       IFS=$'\t' read -r tcat id activity <<<"$rest"
-      # Instant feedback from the table (or the last live decision), then let
-      # the model refine it.
       REACTION=$(cat "$RT/live.json" 2>/dev/null || reaction "tool.$tcat")
       set_state tool "$activity"
       ev "tool $id $tcat"
@@ -565,7 +525,7 @@ cmd_turn() {
 
   ev rest
   rm -f "$RT/turn.pid"
-  touch "$RT/sid" 2>/dev/null # the resume window counts from the end of the turn
+  touch "$RT/sid" 2>/dev/null
   if [[ -e $RT/cancel.$$ ]]; then
     stop_live
     [[ -n ${SPEAK_PID:-} ]] && kill "$SPEAK_PID" 2>/dev/null
@@ -576,7 +536,6 @@ cmd_turn() {
   if [[ $replied == false ]]; then
     failed="the agent stopped without replying (exit ${exit_code:-?}, see glitch.log)"
   fi
-  # No SAY line (the agent ignored the convention): fall back to the first sentence.
   if [[ -z $say && -z $failed ]]; then
     say=$(sed -E 's/([.!?]) .*/\1/' <<<"${result:0:400}" | head -1)
     say=${say:0:160}
@@ -619,13 +578,12 @@ cmd_turn() {
     REACTION=$fin set_state speaking "final reaction"
   ) 8>&- 9>&- &
   local look_pid=$!
-  # Don't talk over a recording that started meanwhile.
   if [[ ! -e $RT/recording ]]; then
     contour=arch
     [[ $say == *\? ]] && contour=rise
     [[ -n $failed || $mood == sorry || $mood == concerned ]] && contour=fall
     cue --contour "$contour"
-    sleep 0.4 # let the beeps lead into the voice
+    sleep 0.4
     [[ -s $RT/say.env ]] && ev "say $(<"$RT/say.env")"
     if play "$RT/say.wav" && [[ $state == speaking && -s $RT/say.wav ]]; then
       REACTION='{"voice":"bubble","energy":0.4,"mood":"calm"}' cue --notes 360
@@ -658,8 +616,6 @@ cmd_open() {
   fi
 }
 
-# PermissionRequest hook: ask through Omarchy's menu while the orb asks out
-# loud. Escape, a timeout or any failure denies.
 cmd_approve() {
   local in label ask pick before
   in=$(cat)
@@ -701,11 +657,9 @@ cmd_cancel() {
   fi
   hush
   pid=$(cat "$RT/turn.pid" 2>/dev/null)
-  # Turns run in their own session (cmd_stop setsid's them), so the session id
-  # is the turn's pid; anything else isn't ours to kill.
   if [[ -n $pid ]] && grep -qs "_turn" "/proc/$pid/cmdline" &&
     [[ $(ps -o sid= -p "$pid" | tr -d ' ') == "$pid" ]]; then
-    touch "$RT/cancel.$pid" # the turn ends quietly instead of reporting an error
+    touch "$RT/cancel.$pid"
     pkill -INT -s "$pid" -x claude 2>/dev/null
     for _ in 1 2 3 4 5 6; do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
     pkill -TERM -s "$pid" 2>/dev/null
@@ -730,7 +684,6 @@ cmd_reap() {
   dir=$(tr '\0' '\n' <"/proc/$main/environ" | sed -n 's/^CLAUDE_CONFIG_DIR=//p')
   dir="${dir:-$HOME/.claude}/projects"
   [[ -d $dir ]] || return 0
-  # Any project's transcript counts: voice turns and terminal sessions are activity too.
   recent=$(find "$dir" -name '*.jsonl' -mmin -"$REMOTE_IDLE_MIN" -print -quit) || return 1
   [[ -z $recent ]] || return 0
   # The restart kills the whole cgroup, so wait while it holds anything besides
@@ -743,12 +696,11 @@ cmd_reap() {
   for p in $procs; do
     [[ $p == "$main" || $(cat "/proc/$p/comm" 2>/dev/null) == wl-copy ]] && continue
     top=$p up=$(stat_field "$p" 2)
-    [[ $up == "$main" ]] && continue # a session
-    # Climb until up is the session and top is its child that p hangs off.
+    [[ $up == "$main" ]] && continue
     while [[ -n $up && $(stat_field "$up" 2) != "$main" ]]; do
       top=$up up=$(stat_field "$up" 2)
     done
-    ((${up:-0} > 1)) || return 0 # gone, or reparented out of the tree
+    ((${up:-0} > 1)) || return 0
     (($(stat_field "$top" 20) - $(stat_field "$up" 20) <= grace)) || return 0
   done
   log "remote: every session idle ${REMOTE_IDLE_MIN}m, restarting glitch-remote"
@@ -757,7 +709,7 @@ cmd_reap() {
 
 case "${1:-}" in
 toggle) shift; cmd_toggle "$@" ;;
-stop) exec 8>"$RT/key.lock"; flock 8; cmd_stop ;; # the recording watchdog
+stop) exec 8>"$RT/key.lock"; flock 8; cmd_stop ;;
 _turn) cmd_turn "$2" "${3:-false}" ;;
 _live) cmd_live ;;
 _expire) close_card ;;

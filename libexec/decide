@@ -92,15 +92,8 @@ QUESTIONS = {
     ]),
 }
 
-# Gentle taste priors multiplied into the model's probabilities (the dot
-# lattice reads best; stripes are loud as a default).
 PRIORS = {"pattern": {"dots": 1.8, "rings": 1.2, "stripes": 0.5}}
 ORDER = ["mood", "pattern", "palette", "motion", "voice", "energy", "pitch", "rate"]
-# While working, the orb shows what kind of work it is; trouble looks (static,
-# jitter, stillness) are kept for real outcomes, and the rings pattern stays
-# out so a live mic always looks distinct. Fewer questions keep it quick.
-# The palette carries the mood over from the last turn while working (it's
-# emotional continuity); pattern and motion show the activity.
 WORKING_ORDER = ["pattern", "motion", "energy"]
 WORKING_EXCLUDE = {"pattern": {"noise", "rings"}, "motion": {"jitter", "still"}}
 
@@ -244,7 +237,7 @@ def main():
         return 1
     try:
         raw = future.result()
-    except (OSError, ValueError) as e:  # network, HTTP status, missing key, bad JSON
+    except (OSError, ValueError) as e:
         print(f"decide: {os.environ.get('MIND', 'local')}: {e}", file=sys.stderr)
         return 1
     except Exception:
@@ -266,7 +259,7 @@ def main():
         a = answers.get(name) or {}
         return sum(float(k) * v for k, v in a.items()) if a else default
 
-    energy = round((expect("energy", 3) - 1) / 4, 2)  # 1..5 -> 0..1
+    energy = round((expect("energy", 3) - 1) / 4, 2)
     last = ((ev.get("history") or [{}])[-1].get("reaction") or {})
     carried = last.get("palette")
     if carried not in [o for o, _ in QUESTIONS["palette"][1]]:
@@ -278,7 +271,6 @@ def main():
         "voice": pick("voice", "chatter" if working else "chirp"),
         "energy": energy,
         "mood": pick("mood", "focused" if working else "calm"),
-        # Without the pitch/rate questions (while working), follow energy.
         "basePitch": round(expect("pitch", 300 + energy * 300)),
         "beepRate": round(expect("rate", 3 + energy * 6), 1),
     }))
