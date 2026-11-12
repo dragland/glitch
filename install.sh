@@ -184,7 +184,7 @@ if ((with_remote)); then
   # prompt for ~/Work; without both, the server exits and restarts every 30 s.
   if [[ -d $HOME/Work ]] && jq -e --arg dir "$HOME/Work" '.remoteDialogSeen and .projects[$dir].hasTrustDialogAccepted' \
     "$HOME/.claude.json" >/dev/null 2>&1; then
-    # --now leaves a running server alone, so an update doesn't cut off sessions mid-turn.
+    # Start only a stopped server: a restart would cut off its sessions mid-turn.
     systemctl --user enable glitch-remote.service glitch-remote-reap.timer >/dev/null 2>&1 || true
     systemctl --user start glitch-remote-reap.timer >/dev/null 2>&1 || true
     if ! systemctl --user is-active --quiet glitch-remote.service; then

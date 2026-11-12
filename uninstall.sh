@@ -51,5 +51,5 @@ if [[ ${1:-} == --purge ]]; then
   echo "    deleted ~/.local/share/glitch and ~/.config/glitch"
 fi
 echo "==> Done (voxtype settings, the ydotool package and its /etc/udev and /etc/modules-load.d files were left as they are)"
-# Stopping it ends a remote control session that ran this, so it goes after everything else.
+# Last, since stopping it also ends a remote control session running this script.
 systemctl --user stop glitch-remote-reap.timer glitch-remote.service >/dev/null 2>&1
