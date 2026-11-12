@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Remove glitch's links, keybinding hook, service and orb plugin.
+# Remove glitch's links, keybinding hook, services and orb plugin.
 #
 #   ./uninstall.sh           keep downloads (~/.local/share/glitch) and settings
 #   ./uninstall.sh --purge   also delete downloads and ~/.config/glitch
@@ -17,6 +17,10 @@ echo "==> Stopping glitch"
 glitch cancel >/dev/null 2>&1
 systemctl --user disable --now glitch-mind.service >/dev/null 2>&1
 unlink_if_link "$CONFIG/systemd/user/glitch-mind.service"
+systemctl --user disable --now glitch-remote-reap.timer glitch-remote.service >/dev/null 2>&1
+for u in glitch-remote.service glitch-remote-reap.service glitch-remote-reap.timer; do
+  unlink_if_link "$CONFIG/systemd/user/$u"
+done
 systemctl --user daemon-reload
 
 omarchy plugin disable "$PLUGIN_ID" >/dev/null 2>&1

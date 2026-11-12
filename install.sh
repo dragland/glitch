@@ -6,6 +6,7 @@
 #   ./install.sh                 everything
 #   ./install.sh --no-mind       skip the local decision model (orb uses reactions.json)
 #   ./install.sh --no-voxtype    don't touch voxtype's config
+#   ./install.sh --no-remote     skip remote control (sessions from the Claude app)
 #
 # Nothing here needs sudo. Downloads (~1.3 GB with the mind) go to
 # ~/.local/share/glitch, pinned and checksummed in this file.
@@ -30,11 +31,13 @@ VOICE_JSON_SHA=5681426d4aead22195de70531eeeeddb46493cfaffc5764b2ea3db73428b651c
 
 with_mind=1
 tweak_voxtype=1
+with_remote=1
 for arg in "$@"; do
   case "$arg" in
   --no-mind) with_mind=0 ;;
   --no-voxtype) tweak_voxtype=0 ;;
-  -h | --help) sed -n '3,8p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  --no-remote) with_remote=0 ;;
+  -h | --help) sed -n '3,9p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
   *) echo "Unknown option: $arg" >&2; exit 1 ;;
   esac
 done
@@ -164,6 +167,32 @@ if ((with_mind)); then
   systemctl --user restart glitch-mind.service
   for _ in $(seq 1 30); do curl -fs localhost:8765/health >/dev/null 2>&1 && break; sleep 1; done
   curl -fs localhost:8765/health >/dev/null 2>&1 && ok "glitch-mind is up on :8765" || echo "    warning: glitch-mind isn't answering yet (journalctl --user -u glitch-mind)"
+fi
+
+if ((with_remote)); then
+  step "Remote control (sessions from the Claude app)"
+  for u in glitch-remote.service glitch-remote-reap.service glitch-remote-reap.timer; do
+    link "$REPO/systemd/$u" "$CONFIG/systemd/user/$u"
+  done
+  systemctl --user daemon-reload
+  # The service has no TTY for Claude's one-time "Enable Remote Control?"
+  # (remoteDialogSeen, undocumented: re-check when Claude changes) or the trust
+  # prompt for ~/Work; without both, the server exits and restarts every 30 s.
+  home=$(omarchy-agent-account-home claude 2>/dev/null || true)
+  if [[ -d $HOME/Work ]] && jq -e --arg dir "$HOME/Work" '.remoteDialogSeen and .projects[$dir].hasTrustDialogAccepted' \
+    "${home:-$HOME}/.claude.json" >/dev/null 2>&1; then
+    # --now leaves a running server alone, so an update doesn't cut off sessions mid-turn.
+    systemctl --user enable --now glitch-remote.service glitch-remote-reap.timer >/dev/null 2>&1 || true
+    sleep 5 # a server that can't start (signed out, folder already served) exits within seconds
+    if systemctl --user is-active --quiet glitch-remote.service; then
+      ok "$(hostname) shows up in the Claude app (Code tab)"
+    else
+      echo "    warning: glitch-remote isn't running (journalctl --user -u glitch-remote)"
+    fi
+  else
+    echo "    one-time setup: run  cd ~/Work && claude remote-control"
+    echo "    answer y and trust the folder, Ctrl+C once it's up, then re-run ./install.sh"
+  fi
 fi
 
 if ((tweak_voxtype)); then

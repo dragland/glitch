@@ -237,7 +237,7 @@ adapter_claude() {
   hook=$(jq -cn --arg cmd "$GLITCH_HOME/bin/glitch _approve" \
     '{hooks: {PermissionRequest: [{matcher: "*", hooks: [{type: "command", command: $cmd, timeout: 75}]}]}}')
   args=(-p --output-format stream-json --verbose --include-partial-messages
-    --permission-mode auto --permission-prompts none --settings "$hook"
+    --permission-mode auto --permission-prompts none --settings "$hook" --chrome
     --append-system-prompt "$(voice_prompt)")
   [[ -n $sid ]] && args+=(--resume "$sid")
   # stream-json requires --verbose. SIGINT ends a turn cleanly (SIGTERM leaves
@@ -347,7 +347,7 @@ run_agent() { "adapter_$1" "$2"; }
 open_agent() {
   case "$1" in
   codex) exec omarchy-launch-tui --app-id=org.omarchy.agent codex resume --approve-for-me "$2" ;;
-  *) exec omarchy-launch-tui --app-id=org.omarchy.agent claude --permission-mode auto --resume "$2" ;;
+  *) exec omarchy-launch-tui --app-id=org.omarchy.agent claude --permission-mode auto --chrome --resume "$2" ;;
   esac
 }
 
@@ -659,6 +659,48 @@ cmd_cancel() {
   REACTION=$(reaction mood.unsure) set_state idle "cancelled"
 }
 
+# Remote control (glitch-remote.service) keeps each session it spawned (~650 MB
+# with MCP servers, and one of 32 slots) until it restarts; only claude.ai
+# project threads park themselves. Restart it once every session has been quiet
+# REMOTE_IDLE_MIN minutes (glitch-remote-reap.timer): the next message respawns
+# a session with its context. Never kill one session's process: the app keeps
+# showing it connected while its turns hang. A turn waiting with no process (an
+# unanswered question, a /loop) is lost.
+cmd_reap() {
+  local main dir recent p top up grace procs
+  [[ $REMOTE_IDLE_MIN =~ ^[1-9][0-9]*$ ]] || { echo "REMOTE_IDLE_MIN must be a positive number" >&2; return 1; }
+  main=$(systemctl --user show -p MainPID --value glitch-remote.service)
+  ((${main:-0} > 0)) || return 0
+  # A restart leaves one pre-created session, so with one there's nothing to free.
+  (($(pgrep -c -P "$main") > 1)) || return 0
+  dir=$(tr '\0' '\n' <"/proc/$main/environ" | sed -n 's/^CLAUDE_CONFIG_DIR=//p')
+  dir="${dir:-$HOME/.claude}/projects"
+  [[ -d $dir ]] || return 0
+  # Any recent transcript counts, voice turns and terminal sessions included.
+  recent=$(find "$dir" -name '*.jsonl' -mmin -"$REMOTE_IDLE_MIN" -print -quit) || return 1
+  [[ -z $recent ]] || return 0
+  # The restart kills the whole cgroup. Everything in it must be the server, a
+  # session, or hang off a process its session started within seconds (an MCP
+  # server); anything else is a tool call or a job an agent left running. A
+  # wl-copy left serving an agent's clipboard copy doesn't count.
+  stat_field() { sed 's/.*) //' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f"$2"; } # 2 ppid, 20 start time
+  grace=$((10 * $(getconf CLK_TCK)))
+  procs=$(<"/sys/fs/cgroup$(cut -d: -f3- "/proc/$main/cgroup")/cgroup.procs") || return 1
+  for p in $procs; do
+    [[ $p == "$main" || $(cat "/proc/$p/comm" 2>/dev/null) == wl-copy ]] && continue
+    top=$p up=$(stat_field "$p" 2)
+    [[ $up == "$main" ]] && continue # a session
+    # Climb until up is the session and top its child that p hangs off.
+    while [[ -n $up && $(stat_field "$up" 2) != "$main" ]]; do
+      top=$up up=$(stat_field "$up" 2)
+    done
+    ((${up:-0} > 1)) || return 0 # gone, or reparented out of the tree
+    (($(stat_field "$top" 20) - $(stat_field "$up" 20) <= grace)) || return 0
+  done
+  log "remote: every session idle ${REMOTE_IDLE_MIN}m, restarting glitch-remote"
+  systemctl --user restart glitch-remote.service
+}
+
 case "${1:-}" in
 toggle) shift; cmd_toggle "$@" ;;
 stop) exec 8>"$RT/key.lock"; flock 8; cmd_stop ;; # the recording watchdog
@@ -666,6 +708,7 @@ _turn) cmd_turn "$2" "${3:-false}" ;;
 _live) cmd_live ;;
 _expire) close_card ;;
 _approve) cmd_approve ;;
+_reap) cmd_reap ;;
 open) cmd_open ;;
 new) forget_session; REACTION=$(reaction mood.calm) set_state done "fresh session" ;;
 cancel) cmd_cancel ;;
