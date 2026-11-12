@@ -18,5 +18,6 @@ awk '
     printf "#version 440\nlayout(location = 0) in vec2 qt_TexCoord0;\nlayout(location = 0) out vec4 fragColor;\n"
     printf "layout(std140, binding = 0) uniform buf {\n    mat4 qt_Matrix;\n    float qt_Opacity;\n%s};\n%s", u, b
   }' "$here/orb.glsl" >"$frag"
+# --qt6's targets less GLSL 100 es and 120, which have no integer ops (the hash).
 LD_LIBRARY_PATH="$(dirname "$(dirname "$(dirname "$qsb")")")${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-  "$qsb" --qt6 -o "$here/glitch.frag.qsb" "$frag"
+  "$qsb" --glsl "300 es,150" --hlsl 50 --msl 12 -o "$here/glitch.frag.qsb" "$frag"
