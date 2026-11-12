@@ -109,7 +109,7 @@ speech_warm() {
 speech_render() {
   [[ -n ${SPEAK_PID:-} ]] || return 0
   timeout 5 bash -c 'printf "%s" "$1" >"$2"' _ "$1" "$RT/say.fifo" 2>/dev/null
-  timeout 5 tail --pid="$SPEAK_PID" -f /dev/null 2>/dev/null
+  timeout 5 tail -s 0.05 --pid="$SPEAK_PID" -f /dev/null 2>/dev/null # -s: the default poll is 1 s
   kill "$SPEAK_PID" 2>/dev/null
   rm -f "$RT/say.fifo"
   SPEAK_PID=""
@@ -570,6 +570,16 @@ cmd_turn() {
 
   notify "$summary" "$body" --exec "$0" open &
   set_state "$state" "$say"
+  # The decision model's final reaction goes on the orb as soon as it's ready,
+  # usually mid-sentence. Waited on below, so it can't land after "done".
+  (
+    timeout 5 tail -s 0.05 --pid="$decide_pid" -f /dev/null 2>/dev/null
+    fin=$(cat "$RT/final.out" 2>/dev/null)
+    [[ -n $fin && $state == speaking && ! -e $RT/recording ]] || exit 0
+    [[ $(jq -r .state "$RT/state.json" 2>/dev/null) == speaking ]] || exit 0
+    REACTION=$fin set_state speaking "final reaction"
+  ) 8>&- 9>&- &
+  local look_pid=$!
   # Don't talk over a recording that started meanwhile.
   if [[ ! -e $RT/recording ]]; then
     cue
@@ -577,7 +587,7 @@ cmd_turn() {
     play "$RT/say.wav"
   fi
 
-  timeout 5 tail --pid="$decide_pid" -f /dev/null 2>/dev/null
+  wait "$look_pid" 2>/dev/null
   fin=$(cat "$RT/final.out" 2>/dev/null)
   log "final ${fin:-table}"
   if [[ -n $fin && $state != needs_you ]]; then
