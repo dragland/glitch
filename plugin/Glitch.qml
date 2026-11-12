@@ -21,6 +21,7 @@ import qs.Commons
 //        tok <chars>      streamed text: the pattern drifts at token speed
 //        tool <id> <cat>  a tool call went out (look, make, run, delegate)
 //        end <id>         it came back
+//        rest             the work is over: nothing is out any more
 //        ctx <0..1>       how full the context is (the tide, shown while working)
 //        say <hz> <v>...  the loudness envelope of the line about to be spoken (v = 0..99)
 //        hush             speech stopped early
@@ -110,12 +111,7 @@ Item {
     if (r.energy !== undefined) root.energy = Math.max(0, Math.min(1, Number(r.energy)))
     if (s === "tool" || s === "speaking" || (s === "listening" && root.mode !== "listening")) root.bump(0.25)
     if (s === "transcribing" && root.mode === "listening") { root.dipAt = root.clock; root.rushUntil = root.clock + 0.45; blinkAnim.restart() }
-    if (s !== "thinking" && s !== "tool") {
-      // The work is over: nothing is in flight, and any moon still out goes home.
-      root.inflight = ({})
-      if (root.moons.some(m => m.back < 0)) root.moons = root.moons.map(m => m.back < 0 ? Object.assign({}, m, { back: root.clock }) : m)
-    }
-    if (s !== "speaking") root.sayStart = -1
+    if (s !== root.mode) root.sayStart = -1  // a new state ends the last line's envelope
     root.mode = s
     root.shown = true
     var linger = lingerFor(s)
@@ -157,15 +153,17 @@ Item {
   property int edits: 0
   property real editAt: -10
   property real flash: 0
-  property real reveal: edits > 0 ? 0.06 + 0.72 * (1 - Math.exp(-0.5 * edits)) : 0.6
+  // Cells only ever fill in: the first edit starts from the same share as none.
+  property real reveal: 0.06 + 0.72 * (1 - Math.exp(-0.5 * Math.max(1, edits)))
   Behavior on reveal { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
 
   property int ticks: 0             // tool calls this turn
   property real tickAt: -10
-  property real tickAlpha: working ? 1 : 0   // they belong to the work: gone once it speaks
-  Behavior on tickAlpha { NumberAnimation { duration: 600 } }
+  property real workAlpha: working ? 1 : 0   // ticks and tide belong to the work: gone once it speaks
+  Behavior on workAlpha { NumberAnimation { duration: 600 } }
 
   property var moons: []            // subagents out working: {id, born, back, w, ph, rad}
+  property int moonsBorn: 0         // this turn, so each takes its own orbit
   property real ctx: 0              // context fill 0..1
 
   function countOut(cat) {
@@ -178,10 +176,15 @@ Item {
     var a = line.trim().split(" ")
     switch (a[0]) {
     case "turn":
-      ticks = 0; edits = 0; moons = []; inflight = ({}); pendingChars = 0; flash = 0
+      ticks = 0; edits = 0; moons = []; moonsBorn = 0; inflight = ({}); pendingChars = 0; flash = 0
+      scrollX = 0; scrollY = 0
+      break
+    case "rest":
+      inflight = ({})
+      if (moons.some(o => o.back < 0)) moons = moons.map(o => o.back < 0 ? Object.assign({}, o, { back: clock }) : o)
       break
     case "tok":
-      pendingChars = Math.min(2000, pendingChars + (Number(a[1]) || 0))
+      pendingChars = Math.max(0, Math.min(2000, pendingChars + (Number(a[1]) || 0)))
       break
     case "tool": {
       var cat = a[2] || "run", next = Object.assign({}, inflight)
@@ -194,7 +197,7 @@ Item {
       else {
         cometUntil = clock + 0.6
         if (cat === "delegate" && moons.length < 6) {
-          var i = moons.length
+          var i = moonsBorn++ % 6
           moons = moons.concat([{ id: a[1], born: clock, back: -1, w: [1.9, -1.4, 1.6, -1.1, 1.3, -1.7][i],
                                   ph: Math.random() * 2 * Math.PI, rad: [40, 54, 46, 60, 50, 66][i] }])
         }
@@ -216,7 +219,7 @@ Item {
       break
     case "say": {
       var hz = Number(a[1]) || 50, e = []
-      for (var n = 2; n < a.length; n++) e.push(Number(a[n]) / 99)
+      for (var n = 2; n < a.length; n++) e.push(Math.max(0, Math.min(1, Number(a[n]) / 99)) || 0)
       sayEnv = e; sayHz = hz; sayStart = clock + 0.06  // pw-play takes a moment to start
       break
     }
@@ -227,12 +230,15 @@ Item {
   }
 
   // The script appends to this file; tail hands each line over as it lands.
+  // (GLITCH_RT points a test instance at a scratch directory)
   readonly property string runtimeDir: Quickshell.env("GLITCH_RT") || (Quickshell.env("XDG_RUNTIME_DIR") + "/glitch")
   Process {
     running: true
-    // -s: how often tail looks for the file before the first turn creates it
-    command: ["tail", "-n", "0", "-s", "0.2", "-F", root.runtimeDir + "/orb.events"]
+    // The file is made first: a tail that starts without it polls for the
+    // rest of its life, and every signal lands up to its poll interval late.
+    command: ["sh", "-c", 'mkdir -p "$1" && : >>"$1/orb.events" && exec tail -n 0 -F "$1/orb.events"', "sh", root.runtimeDir]
     stdout: SplitParser { onRead: line => root.event(line) }
+    onExited: running = true
   }
 
   // ---- voice -------------------------------------------------------------------
@@ -241,7 +247,7 @@ Item {
   // does), with about 1% of rim give and a 2% stretch.
   property real voice: 0            // smoothed, drives halo and travel
   property real voiceFast: 0        // nearly raw, drives the give
-  property real micMax: 0.08        // running peak, so a quiet mic still fills the range
+  property real micMax: 0.02        // running peak (linear; -34 dBFS at least), so a quiet voice still fills the range
   property var sayEnv: []
   property real sayHz: 50
   property real sayStart: -1
@@ -257,7 +263,7 @@ Item {
   PwNodePeakMonitor {
     id: mic
     node: Pipewire.defaultAudioSource
-    enabled: root.mode === "listening"
+    enabled: root.shown && root.mode === "listening"
   }
 
   function ping(dir) {
@@ -302,10 +308,10 @@ Item {
     NumberAnimation { target: root; property: "lid"; to: 1; duration: 110; easing.type: Easing.OutQuad }
   }
   Timer {
-    interval: 2600 + Math.random() * 3600
+    interval: 3000
     repeat: true
     running: root.shown && !root.reduceMotion
-    onTriggered: blinkAnim.restart()
+    onTriggered: { blinkAnim.restart(); interval = 2600 + Math.random() * 3600 }
   }
 
   // The overlay takes no input, so the cursor is polled over Hyprland's request
@@ -380,10 +386,12 @@ Item {
       // Voice level.
       var target = 0
       if (root.mode === "listening") {
-        var raw = mic.peak || 0
-        root.micMax = Math.max(root.micMax * Math.pow(0.5, dt / 20), raw, 0.03)
+        // The monitor's peak is the cube root of the sample peak; undo that, or
+        // room noise alone reads as a tenth of full scale.
+        var raw = Math.pow(mic.peak || 0, 3)
+        root.micMax = Math.max(root.micMax * Math.pow(0.5, dt / 20), raw, 0.02)
         target = Math.min(1.25, raw / (root.micMax * 0.8))
-      } else if (root.mode === "speaking" && root.sayStart >= 0) {
+      } else if (root.sayStart >= 0) {
         var i = Math.floor((root.clock - root.sayStart) * root.sayHz)
         if (i >= 0 && i < root.sayEnv.length) target = root.sayEnv[i]
       }
@@ -395,7 +403,7 @@ Item {
         root.ping(root.mode === "listening" ? -1 : 1)
       }
 
-      // Rings travel only with sound: in while you talk, out while it does.
+      // Rings creep in while you talk and out while it does, faster with the sound.
       if (root.mode === "listening") root.ringPhase += (14 + 150 * root.voice) * dt
       else if (root.mode === "speaking") root.ringPhase -= (8 + 140 * root.voice) * dt
       if (root.clock < root.rushUntil) root.ringPhase += 400 * dt
@@ -405,9 +413,9 @@ Item {
       var flow = root.pendingChars * (1 - Math.exp(-dt / 0.25))
       root.pendingChars -= flow
       root.tokenRate = dt > 0 ? Math.min(1.5, flow / dt / 220) : 0
-      if (root.working && !root.reduceMotion) {
-        root.scrollX = (root.scrollX + 30 * root.tokenRate * dt) % 420
-        root.scrollY = (root.scrollY + 16 * root.tokenRate * dt) % 420
+      if (root.working && !root.reduceMotion) {  // (reset each turn, so it stays small)
+        root.scrollX += 30 * root.tokenRate * dt
+        root.scrollY += 16 * root.tokenRate * dt
       }
 
       // Waves roll gently at rest, and at token speed while working.
@@ -428,7 +436,11 @@ Item {
 
       // A subagent that came home: one ping, a little glow, and it's gone.
       var ms = root.moons, keep = ms.filter(m => m.back < 0 || root.clock - m.back < 0.5)
-      if (keep.length !== ms.length) { root.moons = keep; root.ping(1); root.bump(0.3) }
+      if (keep.length !== ms.length) {
+        root.moons = keep
+        root.bump(0.3)
+        if (root.mode !== "listening") root.ping(1)  // while you talk, the rings are yours
+      }
     }
   }
 
@@ -469,7 +481,7 @@ Item {
       var i = Math.min(3, Math.floor(t * 4)), f = t * 4 - i
       return { x: (pts[i][0] + (pts[i + 1][0] - pts[i][0]) * f) * a, y: (pts[i][1] + (pts[i + 1][1] - pts[i][1]) * f) * a, rot: 0, sx: 1, sy: 1 }
     }
-    // A hop with 1% of squash (the original: 40 px and 5%).
+    // A hop with 1% of squash.
     case "bounce": return { x: 0, y: -24 * s * a, rot: 0, sx: 1 + (0.01 - 0.02 * s) * a, sy: 1 + (-0.01 + 0.02 * s) * a }
     default: return { x: 0, y: 0, rot: 0, sx: 1, sy: 1 }
     }
@@ -480,7 +492,7 @@ Item {
   readonly property var give: {
     if (reduceMotion) return { sx: 1, sy: 1 }
     var g = kick(clock - dipAt, 13, 6), e = kick(clock - editAt, 15, 7)
-    var v = mode === "speaking" ? voiceFast : 0
+    var v = sayStart >= 0 ? voiceFast : 0
     return { sx: 1 + 0.008 * v + 0.025 * g + 0.02 * e, sy: 1 + 0.022 * v - 0.04 * g - 0.03 * e }
   }
 
@@ -504,7 +516,7 @@ Item {
     target: "glitch"
     function set(payloadJson: string): string { root.set(payloadJson); return "ok" }
     function event(line: string): string { root.event(line); return "ok" }
-    function hide(): string { root.shown = false; return "ok" }
+    function hide(): string { root.shown = false; root.mode = "idle"; return "ok" }
     function ping(): string { return "ok" }
   }
 
@@ -579,7 +591,7 @@ Item {
           property point eye: Qt.point(root.eyeX, root.eyeY)
           property real lens: (0.62 + 0.06 * root.voice) * root.lid
           property real lensSize: 30 + root.energy * 8 + 7 * root.voice
-          property real eyeGlow: (0.62 + (root.mode === "speaking" ? 0.3 * root.voice : 0)) * (0.2 + 0.8 * root.lid)
+          property real eyeGlow: (0.62 + (root.sayStart >= 0 ? 0.3 * root.voice : 0)) * (0.2 + 0.8 * root.lid)
           property real aa: 1 / (root.k * (panel.screen ? panel.screen.devicePixelRatio : 1))
           property point scroll: Qt.point(root.scrollX, root.scrollY)
           property real ringPhase: root.ringPhase
@@ -594,7 +606,7 @@ Item {
           property real comet: root.cometAmt
           property real cometAngle: root.cometAngle
           property real tide: root.ctx
-          property real tideShow: root.tickAlpha
+          property real tideShow: root.workAlpha
           property real tidePhase: root.clock
           property vector4d pings: root.pings
           property real pingDir: root.pingDir
@@ -613,7 +625,7 @@ Item {
             height: width
             radius: width / 2
             color: Qt.tint(root.color2, Qt.rgba(1, 1, 1, 0.55))
-            opacity: root.tickAlpha * (0.55 + 0.45 * fresh)
+            opacity: root.workAlpha * (0.55 + 0.45 * fresh)
             x: creature.width / 2 + Math.cos(a) * orbit - width / 2
             y: creature.height / 2 + Math.sin(a) * orbit - height / 2
           }

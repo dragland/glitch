@@ -73,7 +73,7 @@ def one_pole(x, cutoff, high=False):
 
 def syllable(voice, base, energy, mood, exact=False):
     """ZA(): one beep. Returns samples (already includes the trailing 50 ms).
-    `exact` plays the pitch as given (the original rolls it within 20%)."""
+    `exact` plays `base` as given, with none of the random pitch rolls."""
     h = base * (0.8 + random.random() * 0.4)
     if voice == "robot" or exact:
         h = base
