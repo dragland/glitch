@@ -7,8 +7,9 @@
 #   ./install.sh --no-mind       skip the local decision model (orb uses reactions.json)
 #   ./install.sh --no-voxtype    don't touch voxtype's config
 #   ./install.sh --no-remote     skip remote control (sessions from the Claude app)
+#   ./install.sh --no-desktop    skip desktop control (agents' clicks and keys)
 #
-# Nothing here needs sudo. Downloads (~1.3 GB with the mind) go to
+# Only desktop control needs root, once (ydotool and /dev/uinput). Downloads (~1.3 GB with the mind) go to
 # ~/.local/share/glitch, pinned and checksummed in this file.
 
 set -euo pipefail
@@ -32,12 +33,14 @@ VOICE_JSON_SHA=5681426d4aead22195de70531eeeeddb46493cfaffc5764b2ea3db73428b651c
 with_mind=1
 tweak_voxtype=1
 with_remote=1
+with_desktop=1
 for arg in "$@"; do
   case "$arg" in
   --no-mind) with_mind=0 ;;
   --no-voxtype) tweak_voxtype=0 ;;
   --no-remote) with_remote=0 ;;
-  -h | --help) sed -n '3,9p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  --no-desktop) with_desktop=0 ;;
+  -h | --help) sed -n '3,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
   *) echo "Unknown option: $arg" >&2; exit 1 ;;
   esac
 done
@@ -193,6 +196,18 @@ if ((with_remote)); then
     echo "    one-time setup: run  cd ~/Work && claude remote-control"
     echo "    answer y and trust the folder, Ctrl+C once it's up, then re-run ./install.sh"
   fi
+fi
+
+if ((with_desktop)); then
+  step "Desktop control (screenshots, windows, clicks and keys for agents)"
+  if ! command -v ydotool >/dev/null || [[ ! -f /etc/udev/rules.d/70-uinput.rules || ! -f /etc/modules-load.d/uinput.conf ]]; then
+    if [[ -t 0 ]]; then sudo "$REPO/libexec/desktop-root"; else pkexec "$REPO/libexec/desktop-root"; fi
+    ok "installed ydotool; /dev/uinput is yours while you're logged in"
+  fi
+  systemctl --user enable --now ydotool.service >/dev/null 2>&1
+  # Every Claude session (voice, phone, terminal) loads ~/.claude/rules.
+  link "$REPO/config/desktop.md" "$HOME/.claude/rules/glitch-desktop.md"
+  ydotool mousemove -x 0 -y 0 >/dev/null 2>&1 && ok "ydotool works" || echo "    warning: ydotool can't reach /dev/uinput (journalctl --user -u ydotool)"
 fi
 
 if ((tweak_voxtype)); then

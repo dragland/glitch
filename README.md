@@ -19,7 +19,7 @@ git clone git@github.com:dragland/glitch.git ~/glitch
 ```
 
 Needs Omarchy 4 with voxtype dictation (`omarchy-voxtype-install`) and Claude
-Code or Codex. No sudo. Downloads (~1.3 GB, pinned in install.sh) go to
+Code or Codex. Sudo only once, for desktop control (`--no-desktop` skips it). Downloads (~1.3 GB, pinned in install.sh) go to
 `~/.local/share/glitch`; `--no-mind` skips the local model.
 
 Update with `git pull && ./install.sh`; remove with `./uninstall.sh`
@@ -41,9 +41,13 @@ the next Super+D continues that session.
 The agent runs the way `omarchy-agent` runs it (Claude in auto mode, Codex
 with `--approve-for-me`). When Claude would ask your permission, the orb asks
 out loud and Omarchy's menu offers Allow once / Deny; root goes through
-`pkexec`, so you get Omarchy's fingerprint or password dialog. Claude gets Claude
-in Chrome, so it can use your signed-in Chrome (sign the extension into the
-same claude.ai account).
+`pkexec`, so you get Omarchy's fingerprint or password dialog.
+
+Claude can use the computer: Claude in Chrome for your signed-in Chrome (sign
+the extension into the same claude.ai account), and, since Linux has no built-in
+computer use, screenshots, windows, clicks and keys through grim, hyprctl,
+ydotool and wtype. [config/desktop.md](config/desktop.md) tells every Claude
+session (voice, phone, terminal) how.
 
 ### From your phone
 
@@ -84,8 +88,9 @@ Super+D ─► voxtype (local Whisper) ─► transcript ─► agent, headless,
 - `config/`: defaults, including the SAY/MOOD convention in `voice-prompt.md`.
 
 install.sh symlinks the code into `~/.local/bin`, `~/.config/hypr` (plus one
-`require` line in `hyprland.lua`), `~/.config/omarchy/plugins` and
-`~/.config/systemd/user`, and raises voxtype's recording cap (skip that with
+`require` line in `hyprland.lua`), `~/.config/omarchy/plugins`,
+`~/.config/systemd/user` and `~/.claude/rules`, installs ydotool with access to
+`/dev/uinput` (`libexec/desktop-root`, as root), and raises voxtype's recording cap (skip that with
 `--no-voxtype`, then set `RECORD_LIMIT` to voxtype's own cap). Working on
 glitch itself: see AGENTS.md.
 
