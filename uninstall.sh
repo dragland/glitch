@@ -17,10 +17,6 @@ echo "==> Stopping glitch"
 glitch cancel >/dev/null 2>&1
 systemctl --user disable --now glitch-mind.service >/dev/null 2>&1
 unlink_if_link "$CONFIG/systemd/user/glitch-mind.service"
-systemctl --user disable --now glitch-remote-reap.timer glitch-remote.service >/dev/null 2>&1
-for u in glitch-remote.service glitch-remote-reap.service glitch-remote-reap.timer; do
-  unlink_if_link "$CONFIG/systemd/user/$u"
-done
 systemctl --user daemon-reload
 
 omarchy plugin disable "$PLUGIN_ID" >/dev/null 2>&1
@@ -40,10 +36,20 @@ hyprctl reload >/dev/null 2>&1
 
 unlink_if_link "$HOME/.local/bin/glitch"
 systemctl --user disable --now ydotool.service >/dev/null 2>&1
+unlink_if_link "$CONFIG/systemd/user/ydotool.service.d/glitch.conf"
+rmdir "$CONFIG/systemd/user/ydotool.service.d" 2>/dev/null
 unlink_if_link "$HOME/.claude/rules/glitch-desktop.md"
+
+systemctl --user disable glitch-remote-reap.timer glitch-remote.service >/dev/null 2>&1
+for u in glitch-remote.service glitch-remote-reap.service glitch-remote-reap.timer; do
+  unlink_if_link "$CONFIG/systemd/user/$u"
+done
+systemctl --user daemon-reload
 
 if [[ ${1:-} == --purge ]]; then
   rm -rf "$DATA" "$CONFIG/glitch"
   echo "    deleted ~/.local/share/glitch and ~/.config/glitch"
 fi
 echo "==> Done (voxtype settings, the ydotool package and its /etc/udev and /etc/modules-load.d files were left as they are)"
+# Stopping it ends a remote control session that ran this, so it goes after everything else.
+systemctl --user stop glitch-remote-reap.timer glitch-remote.service >/dev/null 2>&1

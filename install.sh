@@ -9,8 +9,9 @@
 #   ./install.sh --no-remote     skip remote control (sessions from the Claude app)
 #   ./install.sh --no-desktop    skip desktop control (agents' clicks and keys)
 #
-# Only desktop control needs root, once (ydotool and /dev/uinput). Downloads (~1.3 GB with the mind) go to
-# ~/.local/share/glitch, pinned and checksummed in this file.
+# Only desktop control needs root, once (ydotool and /dev/uinput). Downloads
+# (~1.3 GB with the mind) go to ~/.local/share/glitch, pinned and checksummed
+# in this file.
 
 set -euo pipefail
 
@@ -181,12 +182,15 @@ if ((with_remote)); then
   # The service has no TTY for Claude's one-time "Enable Remote Control?"
   # (remoteDialogSeen, undocumented: re-check when Claude changes) or the trust
   # prompt for ~/Work; without both, the server exits and restarts every 30 s.
-  home=$(omarchy-agent-account-home claude 2>/dev/null || true)
   if [[ -d $HOME/Work ]] && jq -e --arg dir "$HOME/Work" '.remoteDialogSeen and .projects[$dir].hasTrustDialogAccepted' \
-    "${home:-$HOME}/.claude.json" >/dev/null 2>&1; then
+    "$HOME/.claude.json" >/dev/null 2>&1; then
     # --now leaves a running server alone, so an update doesn't cut off sessions mid-turn.
-    systemctl --user enable --now glitch-remote.service glitch-remote-reap.timer >/dev/null 2>&1 || true
-    sleep 5 # a server that can't start (signed out, folder already served) exits within seconds
+    systemctl --user enable glitch-remote.service glitch-remote-reap.timer >/dev/null 2>&1 || true
+    systemctl --user start glitch-remote-reap.timer >/dev/null 2>&1 || true
+    if ! systemctl --user is-active --quiet glitch-remote.service; then
+      systemctl --user start glitch-remote.service >/dev/null 2>&1 || true
+      sleep 5 # a server that can't start (signed out, folder already served) exits within seconds
+    fi
     if systemctl --user is-active --quiet glitch-remote.service; then
       ok "$(hostname) shows up in the Claude app (Code tab)"
     else
@@ -200,13 +204,20 @@ fi
 
 if ((with_desktop)); then
   step "Desktop control (screenshots, windows, clicks and keys for agents)"
-  if ! command -v ydotool >/dev/null || [[ ! -f /etc/udev/rules.d/70-uinput.rules || ! -f /etc/modules-load.d/uinput.conf ]]; then
-    if [[ -t 0 ]]; then sudo "$REPO/libexec/desktop-root"; else pkexec "$REPO/libexec/desktop-root"; fi
-    ok "installed ydotool; /dev/uinput is yours while you're logged in"
+  if ! command -v ydotool >/dev/null || [[ ! -w /dev/uinput ]]; then
+    if [[ -t 0 ]]; then root=sudo; else root=pkexec; fi
+    if $root "$REPO/libexec/desktop-root"; then
+      ok "installed ydotool; /dev/uinput is yours while you're logged in"
+    else
+      echo "    warning: desktop control needs root once; re-run ./install.sh (or --no-desktop)"
+    fi
   fi
-  systemctl --user enable --now ydotool.service >/dev/null 2>&1
+  link "$REPO/systemd/ydotool.service.d/glitch.conf" "$CONFIG/systemd/user/ydotool.service.d/glitch.conf"
+  systemctl --user daemon-reload
+  systemctl --user enable --now ydotool.service >/dev/null 2>&1 || true
   # Every Claude session (voice, phone, terminal) loads ~/.claude/rules.
   link "$REPO/config/desktop.md" "$HOME/.claude/rules/glitch-desktop.md"
+  for _ in 1 2 3 4 5; do ydotool mousemove -x 0 -y 0 >/dev/null 2>&1 && break; sleep 0.5; done
   ydotool mousemove -x 0 -y 0 >/dev/null 2>&1 && ok "ydotool works" || echo "    warning: ydotool can't reach /dev/uinput (journalctl --user -u ydotool)"
 fi
 
