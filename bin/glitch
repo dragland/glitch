@@ -659,12 +659,11 @@ cmd_cancel() {
   REACTION=$(reaction mood.unsure) set_state idle "cancelled"
 }
 
-# Remote control (glitch-remote.service) keeps each session it spawned (~650 MB
-# with MCP servers, and one of 32 slots) until it restarts; only claude.ai
-# project threads park themselves. Restart it once every session has been quiet
-# REMOTE_IDLE_MIN minutes (glitch-remote-reap.timer): the next message respawns
-# a session with its context. A turn waiting with no process (an unanswered
-# question, a /loop) is lost.
+# glitch-remote keeps every session it spawned (~650 MB with its MCP servers, and
+# one of 32 slots) until it restarts, since Claude parks only claude.ai project
+# threads. A restarted server respawns a session with its context on the next
+# message, but drops a turn left waiting with no process (an unanswered
+# question, a /loop).
 cmd_reap() {
   local main dir recent p top up grace procs
   [[ $REMOTE_IDLE_MIN =~ ^[1-9][0-9]*$ ]] || { echo "REMOTE_IDLE_MIN must be a positive number" >&2; return 1; }
@@ -675,13 +674,13 @@ cmd_reap() {
   dir=$(tr '\0' '\n' <"/proc/$main/environ" | sed -n 's/^CLAUDE_CONFIG_DIR=//p')
   dir="${dir:-$HOME/.claude}/projects"
   [[ -d $dir ]] || return 0
-  # Any recent transcript counts, voice turns and terminal sessions included.
+  # Any project's transcript counts: voice turns and terminal sessions are activity too.
   recent=$(find "$dir" -name '*.jsonl' -mmin -"$REMOTE_IDLE_MIN" -print -quit) || return 1
   [[ -z $recent ]] || return 0
-  # The restart kills the whole cgroup. Everything in it must be the server, a
-  # session, or hang off a process its session started within seconds (an MCP
-  # server); anything else is a tool call or a job an agent left running. A
-  # wl-copy left serving an agent's clipboard copy doesn't count.
+  # The restart kills the whole cgroup, so wait while it holds anything besides
+  # the server, its sessions, and whatever hangs off a child a session started
+  # within seconds of itself (MCP servers). Anything else is a tool call or a job
+  # an agent left running. A wl-copy still serving an agent's copy doesn't count.
   stat_field() { sed 's/.*) //' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f"$2"; } # 2 ppid, 20 start time
   grace=$((10 * $(getconf CLK_TCK)))
   procs=$(<"/sys/fs/cgroup$(cut -d: -f3- "/proc/$main/cgroup")/cgroup.procs") || return 1
@@ -689,7 +688,7 @@ cmd_reap() {
     [[ $p == "$main" || $(cat "/proc/$p/comm" 2>/dev/null) == wl-copy ]] && continue
     top=$p up=$(stat_field "$p" 2)
     [[ $up == "$main" ]] && continue # a session
-    # Climb until up is the session and top its child that p hangs off.
+    # Climb until up is the session and top is its child that p hangs off.
     while [[ -n $up && $(stat_field "$up" 2) != "$main" ]]; do
       top=$up up=$(stat_field "$up" 2)
     done

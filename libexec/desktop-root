@@ -1,8 +1,9 @@
 #!/bin/bash
-# Root half of install.sh's desktop control step (sudo, or pkexec without a
-# terminal): ydotool, and /dev/uinput for the user at the seat. uaccess sets an
-# ACL for the active session, so no group change or re-login (the package's own
-# rule only grants the input group); it must sort before 73-seat-late.
+# Root half of install.sh's desktop control step: ydotool, and /dev/uinput for
+# the user at the seat. uaccess gives the active session an ACL, so nobody joins
+# the input group (the package's own 80-uinput.rules grants only that group,
+# which could also read every keyboard) or logs in again. The rule must sort
+# before 73-seat-late.rules.
 set -euo pipefail
 pacman -S --needed --noconfirm ydotool
 echo uinput >/etc/modules-load.d/uinput.conf

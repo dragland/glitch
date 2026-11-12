@@ -46,27 +46,28 @@ with `--approve-for-me`). When Claude would ask your permission, the orb asks
 out loud and Omarchy's menu offers Allow once / Deny; root goes through
 `pkexec`, so you get Omarchy's fingerprint or password dialog.
 
-Claude can use the computer: Claude in Chrome for your signed-in Chrome (sign
-the extension into the same claude.ai account), and, since Linux has no built-in
-computer use, screenshots, windows, clicks and keys through grim, hyprctl,
-ydotool and wtype. [config/desktop.md](config/desktop.md) tells every Claude
-session (voice, phone, terminal) how.
+Claude can use your signed-in Chrome through Claude in Chrome (sign the
+extension into the same claude.ai account). Linux has no built-in computer use,
+so [config/desktop.md](config/desktop.md) tells every Claude session (voice,
+phone, terminal) to take screenshots, find and launch windows, click and type
+with grim, hyprctl, ydotool and wtype.
 
 ### From your phone
 
-install.sh also runs Claude Code's remote control as a user service
-(`glitch-remote`), so this machine shows up in the Claude app and at
-claude.ai/code while you're logged in, and you can start sessions on it from
-there, as can your claude.ai projects. They run in `~/Work` with
-`bypassPermissions` and Claude in Chrome; change that with
-`systemctl --user edit glitch-remote`. Once every session has been quiet for an
-hour (`REMOTE_IDLE_MIN`), the server restarts to free them; the next message
-brings a session back with its context. Glitch's own voice
-turns are `claude -p` and don't appear there. The first install asks you to run
-`claude remote-control` once in `~/Work` to accept its prompts; `--no-remote`
-skips installing it. Turn on **Require trusted devices** at
-claude.ai/settings/account, since anyone signed into your account can drive
-these sessions.
+While you're logged in, `glitch-remote` (Claude Code's remote control) lists
+this machine in the Claude app and at claude.ai/code. Sessions you or your
+claude.ai projects start there run in `~/Work` with `bypassPermissions` and
+Claude in Chrome (`systemctl --user edit glitch-remote` changes that).
+Glitch's own voice turns (`claude -p`) don't appear there.
+
+- The first install asks you to run `claude remote-control` once in `~/Work`
+  to accept its prompts. `./install.sh --no-remote` leaves remote control out
+  entirely.
+- After an hour with no Claude activity (`REMOTE_IDLE_MIN`), the server
+  restarts to free its sessions. The next message brings a session back with
+  its context.
+- Anyone signed into your claude.ai account can drive these sessions, so turn
+  on Require trusted devices at claude.ai/settings/account.
 
 Settings and their defaults are in [config/glitch.conf](config/glitch.conf);
 override them in `~/.config/glitch/glitch.conf`. Your own `reactions.json` there
