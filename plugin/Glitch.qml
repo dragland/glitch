@@ -5,220 +5,30 @@ import Quickshell.Io
 import Quickshell.Services.Pipewire
 import Quickshell.Wayland
 import qs.Commons
+import "orb.mjs" as Orb
 
 // The face of glitch (bin/glitch). Its palettes, patterns, motions and beeps
 // come from the Beep Jev creature (beepjev.replit.app, Yohei Nakajima); the
-// shader (glitch.frag) draws them on a globe-edged disc whose pattern is
-// centred on a gaze point, so the eye is the pattern.
+// shader (orb.glsl) draws them on a globe-edged disc whose pattern is centred
+// on a gaze point, so the eye is the pattern.
 //
-// Two inputs:
-//   1. A state plus a Jev-style reaction, over IPC (what it feels):
-//        omarchy-shell glitch set '{"state":"tool","reaction":{"palette":"ocean","pattern":"waves",
-//          "motion":"orbit","mood":"focused","energy":0.4}}'
-//   2. Live signals, one per line, appended to $XDG_RUNTIME_DIR/glitch/orb.events
-//      (what is happening right now):
-//        turn             a new turn: clear ticks, moons, edits
-//        tok <chars>      streamed text: the pattern drifts at token speed
-//        tool <id> <cat>  a tool call went out (look, make, run, delegate)
-//        end <id>         it came back
-//        rest             the work is over: nothing is out any more
-//        ctx <0..1>       how full the context is (the tide, shown while working)
-//        say <hz> <v>...  the loudness envelope of the line about to be spoken (v = 0..99)
-//        hush             speech stopped early
-//      The mic level while listening is read here, from PipeWire.
+// This file only hosts the orb: orb.mjs holds its logic and lists its inputs,
+// shared with the web orb (web/orb.js). Here, the state comes over IPC, the
+// live signals are tailed from $XDG_RUNTIME_DIR/glitch/orb.events, and the mic
+// level while listening is read from PipeWire.
 Item {
   id: root
 
-  property string mode: "idle"
-  property bool shown: false
-
-  property string paletteName: "electric"
-  property string pattern: "rings"
-  property string motion: "breathe"
-  property string mood: "curious"
-  property real energy: 0.5
-
-  property real activity: 0
-
-  readonly property var palettes: ({
-    electric: { color1: "#00f0ff", color2: "#ff0055", bg: "#08080c" },
-    sunset:   { color1: "#ff7b54", color2: "#ffb26b", bg: "#1a0b12" },
-    ocean:    { color1: "#00a8cc", color2: "#27496d", bg: "#011520" },
-    citrus:   { color1: "#b2d826", color2: "#ffcc00", bg: "#121808" },
-    candy:    { color1: "#ff99cc", color2: "#cc99ff", bg: "#1a081c" },
-    mono:     { color1: "#ffffff", color2: "#888888", bg: "#0a0a0a" },
-    mint:     { color1: "#4de3a4", color2: "#17877a", bg: "#04130f" }
-  })
-  readonly property var patterns: ({ rings: 0, checker: 1, waves: 2, dots: 3, stripes: 4, noise: 5, fine: 6 })
-  readonly property var pal: palettes[paletteName] || palettes.electric
-
-  property color color1: pal.color1
-  property color color2: pal.color2
-  property color bgColor: pal.bg
-  Behavior on color1 { ColorAnimation { duration: 700; easing.type: Easing.OutCubic } }
-  Behavior on color2 { ColorAnimation { duration: 700; easing.type: Easing.OutCubic } }
-  Behavior on bgColor { ColorAnimation { duration: 700; easing.type: Easing.OutCubic } }
-
-  property string prevPattern: "rings"
-  property real patMix: 0
-  NumberAnimation { id: patFade; target: root; property: "patMix"; from: 1; to: 0; duration: 400; easing.type: Easing.InOutQuad }
-
+  readonly property var core: Orb.createOrb()
+  property var f: core.frame()
+  readonly property var u: f.uniforms
   readonly property real k: Style.space(128) / 200
 
-  property real baseDiameter: 200 + (activity + energy) * 100
-  property real baseGlow: 40 + activity * 100
-  property real creatureScale: 1 + activity * 0.1
-  Behavior on baseDiameter { NumberAnimation { duration: 700; easing.type: Easing.OutCubic } }
-  Behavior on baseGlow { NumberAnimation { duration: 700; easing.type: Easing.OutCubic } }
-  Behavior on creatureScale { NumberAnimation { duration: 700; easing.type: Easing.OutCubic } }
-  readonly property real diameter: baseDiameter + (mode === "listening" ? 8 : 5) * voice
-
-  readonly property bool working: mode === "thinking" || mode === "tool"
-  readonly property bool conversing: mode === "listening" || mode === "transcribing" || mode === "speaking"
-
-  function bump(amount) { activity = Math.min(1, activity + amount) }
-
-  function lingerFor(s) {
-    if (s === "done") return 4500
-    if (s === "needs_you") return 25000
-    if (s === "error") return 9000
-    if (s === "idle") return 1200
-    return 0
-  }
-
-  function set(payloadJson) {
-    var m
-    try { m = JSON.parse(payloadJson || "{}") } catch (e) { return }
-    var s = m.state || "idle"
-    if (s === "idle" && !root.shown) return
-    var r = m.reaction || {}
-    if (r.palette) root.paletteName = r.palette
-    if (r.pattern && r.pattern !== root.pattern) {
-      root.prevPattern = root.pattern
-      root.pattern = r.pattern
-      patFade.restart()
-    }
-    if (r.motion && r.motion !== root.motion) { root.motion = r.motion; motionAmp.restart(); phaseAnim.restart() }
-    if (r.mood) root.mood = r.mood
-    if (r.energy !== undefined) root.energy = Math.max(0, Math.min(1, Number(r.energy)))
-    if (s === "tool" || s === "speaking" || (s === "listening" && root.mode !== "listening")) root.bump(0.25)
-    if (s === "transcribing" && root.mode === "listening") { root.dipAt = root.clock; root.rushUntil = root.clock + 0.45; blinkAnim.restart() }
-    if (s !== root.mode) root.sayStart = -1
-    root.mode = s
-    root.shown = true
-    var linger = lingerFor(s)
-    if (linger > 0) { hideTimer.interval = linger; hideTimer.restart() }
-    else hideTimer.stop()
-  }
-
-  Timer {
-    id: hideTimer
-    onTriggered: root.shown = false
-  }
-
-  Timer {
-    interval: 100
-    repeat: true
-    running: root.shown
-    onTriggered: root.activity = Math.max(0, root.activity - 0.05)
-  }
-
-  // ---- live signals ----------------------------------------------------------
-  property real clock: 0
-
-  property real pendingChars: 0
-  property real tokenRate: 0
-  property real scrollX: 0
-  property real scrollY: 0
-
-  property var inflight: ({})       // tool id -> category
-  property real lookUntil: -1
-  property real cometUntil: -1
-  property real lookAngle: -0.5
-  readonly property bool lookOut: working && (countOut("look") > 0 || clock < lookUntil)
-  readonly property bool toolOut: working && (countOut("run") + countOut("delegate") > 0 || clock < cometUntil)
-  property real radarAmt: lookOut ? 1 : 0
-  property real cometAmt: toolOut ? 1 : 0
-  Behavior on radarAmt { NumberAnimation { duration: 250 } }
-  Behavior on cometAmt { NumberAnimation { duration: 300 } }
-
-  property int edits: 0
-  property real editAt: -10
-  property real flash: 0
-  property real reveal: 0.06 + 0.72 * (1 - Math.exp(-0.5 * Math.max(1, edits)))
-  Behavior on reveal { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
-
-  property int ticks: 0
-  property real tickAt: -10
-  property real workAlpha: working ? 1 : 0
-  Behavior on workAlpha { NumberAnimation { duration: 600 } }
-
-  property var moons: []            // subagents out working: {id, born, back, w, ph, rad}
-  property int moonsBorn: 0
-  property real ctx: 0
-
-  function countOut(cat) {
-    var n = 0
-    for (var id in inflight) if (inflight[id] === cat) n++
-    return n
-  }
-
-  function event(line) {
-    var a = line.trim().split(" ")
-    switch (a[0]) {
-    case "turn":
-      ticks = 0; edits = 0; moons = []; moonsBorn = 0; inflight = ({}); pendingChars = 0; flash = 0
-      scrollX = 0; scrollY = 0
-      break
-    case "rest":
-      inflight = ({})
-      if (moons.some(o => o.back < 0)) moons = moons.map(o => o.back < 0 ? Object.assign({}, o, { back: clock }) : o)
-      break
-    case "tok":
-      pendingChars = Math.max(0, Math.min(2000, pendingChars + (Number(a[1]) || 0)))
-      break
-    case "tool": {
-      var cat = a[2] || "run", next = Object.assign({}, inflight)
-      next[a[1]] = cat
-      inflight = next
-      ticks++
-      tickAt = clock
-      if (cat === "make") { edits++; flash = 1; editAt = clock }
-      else if (cat === "look") { lookUntil = clock + 0.9; lookAngle = Math.random() * 2 * Math.PI }
-      else {
-        cometUntil = clock + 0.6
-        if (cat === "delegate" && moons.length < 6) {
-          var i = moonsBorn++ % 6
-          moons = moons.concat([{ id: a[1], born: clock, back: -1, w: [1.9, -1.4, 1.6, -1.1, 1.3, -1.7][i],
-                                  ph: Math.random() * 2 * Math.PI, rad: [40, 54, 46, 60, 50, 66][i] }])
-        }
-      }
-      break
-    }
-    case "end": {
-      var left = Object.assign({}, inflight)
-      delete left[a[1]]
-      inflight = left
-      var ms = moons.slice(), hit = false
-      for (var j = 0; j < ms.length; j++)
-        if (ms[j].id === a[1] && ms[j].back < 0) { ms[j] = Object.assign({}, ms[j], { back: clock }); hit = true }
-      if (hit) moons = ms
-      break
-    }
-    case "ctx":
-      ctx = Math.max(0, Math.min(1, Number(a[1]) || 0))
-      break
-    case "say": {
-      var hz = Number(a[1]) || 50, e = []
-      for (var n = 2; n < a.length; n++) e.push(Math.max(0, Math.min(1, Number(a[n]) / 99)) || 0)
-      sayEnv = e; sayHz = hz; sayStart = clock + 0.06  // pw-play takes a moment to start
-      break
-    }
-    case "hush":
-      sayStart = -1
-      break
-    }
-  }
+  function set(payloadJson) { core.set(payloadJson); f = core.frame() }
+  function event(line) { core.event(line); f = core.frame() }
+  function rgba(c) { return Qt.rgba(c[0], c[1], c[2], c[3]) }
+  function v2(a) { return Qt.point(a[0], a[1]) }
+  function v4(a) { return Qt.vector4d(a[0], a[1], a[2], a[3]) }
 
   // GLITCH_RT points a test instance at a scratch directory.
   readonly property string runtimeDir: Quickshell.env("GLITCH_RT") || (Quickshell.env("XDG_RUNTIME_DIR") + "/glitch")
@@ -231,70 +41,11 @@ Item {
     onExited: running = true
   }
 
-  // ---- voice -------------------------------------------------------------------
-  property real voice: 0
-  property real voiceFast: 0
-  property real micMax: 0.02
-  property var sayEnv: []
-  property real sayHz: 50
-  property real sayStart: -1
-  property real ringPhase: 0
-  property real rushUntil: -1
-  property real dipAt: -10
-  property real lastOnset: -10
-  property var pingStart: [-10, -10, -10, -10]
-  property vector4d pings: Qt.vector4d(0, 0, 0, 0)
-  property real pingDir: 1
-
   PwObjectTracker { objects: [Pipewire.defaultAudioSource] }
   PwNodePeakMonitor {
     id: mic
     node: Pipewire.defaultAudioSource
-    enabled: root.shown && root.mode === "listening"
-  }
-
-  function ping(dir) {
-    var p = pingStart.slice(), oldest = 0
-    for (var i = 1; i < 4; i++) if (p[i] < p[oldest]) oldest = i
-    p[oldest] = clock
-    pingStart = p
-    pingDir = dir
-  }
-
-  function kick(u, freq, damp) { return u <= 0 ? 0 : Math.exp(-damp * u) * Math.sin(freq * u) }
-
-  // ---- the eye -------------------------------------------------------------------
-  property real cursorPctX: 50
-  property real cursorPctY: 50
-  property double lastMouseMove: 0
-  property real eyeX: 0
-  property real eyeY: 0
-  property real wanderX: 0
-  property real wanderY: 0
-  // wanderTick only forces re-evaluation: Date.now() isn't reactive.
-  readonly property bool mouseIdle: Date.now() - lastMouseMove > 4000 && wanderTick >= 0
-  property int wanderTick: 0
-
-  readonly property point eyeTarget: {
-    if (conversing) return Qt.point(0, -4)
-    if (lookOut) return Qt.point(34 * Math.cos(lookAngle) + 6 * Math.sin(clock * 5), 26 * Math.sin(lookAngle) + 5 * Math.cos(clock * 4))
-    if (working && clock - editAt < 1.2) return Qt.point(-4, 18)
-    if (toolOut) return Qt.point(0, 0)
-    if (working && mouseIdle) return Qt.point(wanderX, wanderY)
-    return Qt.point((cursorPctX - 50) * 0.5, (cursorPctY - 50) * 0.5)
-  }
-
-  property real lid: 1
-  SequentialAnimation {
-    id: blinkAnim
-    NumberAnimation { target: root; property: "lid"; to: 0.08; duration: 70; easing.type: Easing.InQuad }
-    NumberAnimation { target: root; property: "lid"; to: 1; duration: 110; easing.type: Easing.OutQuad }
-  }
-  Timer {
-    interval: 3000
-    repeat: true
-    running: root.shown && !root.reduceMotion
-    onTriggered: { blinkAnim.restart(); interval = 2600 + Math.random() * 3600 }
+    enabled: root.f.listening
   }
 
   // The overlay takes no input, so the cursor is polled over Hyprland's request
@@ -319,14 +70,7 @@ Item {
     try { c = JSON.parse(raw) } catch (e) { return false }
     var scr = panel.screen
     if (!scr || c.x === undefined) return true
-    var px = Math.max(0, Math.min(100, (c.x - scr.x) / scr.width * 100))
-    var py = Math.max(0, Math.min(100, (c.y - scr.y) / scr.height * 100))
-    if (Math.abs(px - cursorPctX) + Math.abs(py - cursorPctY) > 0.15) {
-      cursorPctX = px
-      cursorPctY = py
-      lastMouseMove = Date.now()
-      bump(0.05)
-    }
+    core.cursor((c.x - scr.x) / scr.width * 100, (c.y - scr.y) / scr.height * 100)
     return true
   }
 
@@ -337,154 +81,29 @@ Item {
     onTriggered: if (!hyprSock.connected) hyprSock.connected = true
   }
 
-  Timer {
-    interval: 1100
-    repeat: true
-    running: root.shown
-    onTriggered: {
-      root.wanderTick++
-      var a = Math.random() * 2 * Math.PI, d = 22 * (0.3 + Math.random() * 0.7)
-      root.wanderX = Math.cos(a) * d
-      root.wanderY = Math.sin(a) * d
-    }
-  }
-
-  // ---- per frame -----------------------------------------------------------------
-  property real swellPhase: 0
-  property real swellDrift: 0
-  property real radarAngle: 0
-  property real cometAngle: 0
-
   FrameAnimation {
-    running: panel.visible
+    running: root.f.visible
     onTriggered: {
-      var dt = Math.min(frameTime, 0.1)
-      root.clock += dt
-
-      var f = 1 - Math.pow(0.9, dt * 60)
-      root.eyeX += (root.eyeTarget.x - root.eyeX) * f
-      root.eyeY += (root.eyeTarget.y - root.eyeY) * f
-
-      var target = 0
-      if (root.mode === "listening") {
-        // The monitor's peak is the cube root of the sample peak; undo that, or
-        // room noise alone reads as a tenth of full scale.
-        var raw = Math.pow(mic.peak || 0, 3)
-        root.micMax = Math.max(root.micMax * Math.pow(0.5, dt / 20), raw, 0.02)
-        target = Math.min(1.25, raw / (root.micMax * 0.8))
-      } else if (root.sayStart >= 0) {
-        var i = Math.floor((root.clock - root.sayStart) * root.sayHz)
-        if (i >= 0 && i < root.sayEnv.length) target = root.sayEnv[i]
-      }
-      var before = root.voice
-      root.voiceFast += (target - root.voiceFast) * (1 - Math.exp(-dt / 0.03))
-      root.voice += (target - root.voice) * (1 - Math.exp(-dt / 0.09))
-      if (root.voice >= 0.5 && before < 0.5 && root.clock - root.lastOnset >= 0.2) {
-        root.lastOnset = root.clock
-        root.ping(root.mode === "listening" ? -1 : 1)
-      }
-
-      if (root.mode === "listening") root.ringPhase += (14 + 150 * root.voice) * dt
-      else if (root.mode === "speaking") root.ringPhase -= (8 + 140 * root.voice) * dt
-      if (root.clock < root.rushUntil) root.ringPhase += 400 * dt
-      root.ringPhase %= 42000
-
-      var flow = root.pendingChars * (1 - Math.exp(-dt / 0.25))
-      root.pendingChars -= flow
-      root.tokenRate = dt > 0 ? Math.min(1.5, flow / dt / 220) : 0
-      if (root.working && !root.reduceMotion) {
-        root.scrollX += 30 * root.tokenRate * dt
-        root.scrollY += 16 * root.tokenRate * dt
-      }
-
-      var pace = root.reduceMotion ? 0 : (root.working ? 0.2 + root.tokenRate : 1)
-      root.swellPhase = (root.swellPhase + 1.57 * pace * dt) % (2 * Math.PI)
-      root.swellDrift = (root.swellDrift - 10 * pace * dt) % 40
-
-      root.radarAngle = (root.radarAngle + 3.6 * dt) % (2 * Math.PI)
-      root.cometAngle = (root.cometAngle + 7.0 * dt) % (2 * Math.PI)
-      root.flash *= Math.exp(-7 * dt)
-
-      var p = root.pingStart, u = [0, 0, 0, 0]
-      for (var n = 0; n < 4; n++) {
-        var x = (root.clock - p[n]) / 0.8
-        u[n] = x > 0 && x < 1 ? x : 0
-      }
-      root.pings = Qt.vector4d(u[0], u[1], u[2], u[3])
-
-      var ms = root.moons, keep = ms.filter(m => m.back < 0 || root.clock - m.back < 0.5)
-      if (keep.length !== ms.length) {
-        root.moons = keep
-        root.bump(0.3)
-        if (root.mode !== "listening") root.ping(1)
-      }
+      // The monitor's peak is the cube root of the sample peak; undo that, or
+      // room noise alone reads as a tenth of full scale.
+      if (root.f.listening) root.core.mic(Math.pow(mic.peak || 0, 3))
+      root.f = root.core.step(frameTime)
     }
   }
 
-  property bool reduceMotion: false
   Process {
     running: true
     command: ["hyprctl", "-j", "getoption", "animations:enabled"]
     stdout: StdioCollector {
-      onStreamFinished: { try { root.reduceMotion = JSON.parse(text).int === 0 } catch (e) {} }
+      onStreamFinished: { try { root.core.reduceMotion(JSON.parse(text).int === 0); root.f = root.core.frame() } catch (e) {} }
     }
-  }
-
-  // ---- CSS keyframe motions ------------------------------------------------
-  readonly property var motionDurations: ({ bounce: 1000, orbit: 4000, wobble: 2000, breathe: 4000, jitter: 200, still: 1000 })
-  property real phase: 0
-  NumberAnimation on phase {
-    id: phaseAnim
-    from: 0; to: 1; loops: Animation.Infinite
-    duration: root.motionDurations[root.motion] || 4000
-    running: panel.visible
-  }
-  property real amp: 1
-  NumberAnimation { id: motionAmp; target: root; property: "amp"; from: 0; to: 1; duration: 450; easing.type: Easing.OutCubic }
-
-  function swing(t) { return 0.5 - 0.5 * Math.cos(2 * Math.PI * t) }
-  readonly property var motionT: {
-    var t = phase, s = swing(t), a = amp
-    switch (reduceMotion ? "still" : motion) {
-    case "breathe": return { x: 0, y: 0, rot: 0, sx: 1 + 0.15 * s * a, sy: 1 + 0.15 * s * a }
-    case "wobble": { var w = -1 + 2 * s; return { x: 0, y: 0, rot: 5 * w * a, sx: 1 + 0.05 * w * a, sy: 1 + 0.05 * w * a } }
-    case "orbit": return { x: 20 * Math.cos(2 * Math.PI * t) * a, y: 20 * Math.sin(2 * Math.PI * t) * a, rot: 0, sx: 1, sy: 1 }
-    case "jitter": {
-      var pts = [[0, 0], [-2, 2], [2, -2], [-2, -2], [2, 2]]
-      var i = Math.min(3, Math.floor(t * 4)), f = t * 4 - i
-      return { x: (pts[i][0] + (pts[i + 1][0] - pts[i][0]) * f) * a, y: (pts[i][1] + (pts[i + 1][1] - pts[i][1]) * f) * a, rot: 0, sx: 1, sy: 1 }
-    }
-    case "bounce": return { x: 0, y: -24 * s * a, rot: 0, sx: 1 + (0.01 - 0.02 * s) * a, sy: 1 + (-0.01 + 0.02 * s) * a }
-    default: return { x: 0, y: 0, rot: 0, sx: 1, sy: 1 }
-    }
-  }
-
-  readonly property var give: {
-    if (reduceMotion) return { sx: 1, sy: 1 }
-    var g = kick(clock - dipAt, 13, 6), e = kick(clock - editAt, 15, 7)
-    var v = sayStart >= 0 ? voiceFast : 0
-    return { sx: 1 + 0.008 * v + 0.025 * g + 0.02 * e, sy: 1 + 0.022 * v - 0.04 * g - 0.03 * e }
-  }
-
-  property real pillPhase: 0
-  NumberAnimation on pillPhase {
-    from: 0; to: 1; loops: Animation.Infinite; duration: 1000
-    running: root.mood === "surprised" && panel.visible && !root.reduceMotion
-  }
-
-  property real excitedRing: 0
-  SequentialAnimation on excitedRing {
-    running: root.mood === "excited" && panel.visible && !root.reduceMotion
-    loops: Animation.Infinite
-    NumberAnimation { from: 0.001; to: 1; duration: 750; easing.type: Easing.OutCubic }
-    PauseAnimation { duration: 250 }
   }
 
   IpcHandler {
     target: "glitch"
     function set(payloadJson: string): string { root.set(payloadJson); return "ok" }
     function event(line: string): string { root.event(line); return "ok" }
-    function hide(): string { root.shown = false; root.mode = "idle"; return "ok" }
+    function hide(): string { root.core.hide(); root.f = root.core.frame(); return "ok" }
     function ping(): string { return "ok" }
   }
 
@@ -497,7 +116,7 @@ Item {
         if (Quickshell.screens[i].name === name) return Quickshell.screens[i]
       return Quickshell.screens[0]
     }
-    visible: root.shown || stage.opacity > 0.01
+    visible: root.f.visible
     anchors { bottom: true }
     implicitWidth: Math.ceil(760 * root.k)
     implicitHeight: Math.ceil(760 * root.k)
@@ -511,10 +130,8 @@ Item {
     Item {
       id: stage
       anchors.fill: parent
-      opacity: root.shown ? 1 : 0
-      scale: root.shown ? 1 : 0.85
-      Behavior on opacity { NumberAnimation { duration: 400; easing.type: Easing.OutCubic } }
-      Behavior on scale { NumberAnimation { duration: 500; easing.type: Easing.OutBack } }
+      opacity: root.f.opacity
+      scale: root.f.scale
 
       Item {
         id: creature
@@ -522,116 +139,62 @@ Item {
         height: parent.width
         y: parent.height - 260 * root.k - height / 2
         transform: [
-          Scale {
-            origin.x: creature.width / 2; origin.y: creature.height / 2
-            xScale: root.motionT.sx * root.creatureScale * root.give.sx
-            yScale: root.motionT.sy * root.creatureScale * root.give.sy
-          },
-          Rotation { origin.x: creature.width / 2; origin.y: creature.height / 2; angle: root.motionT.rot },
-          Translate {
-            x: (root.motionT.x + root.eyeX * 0.2) * root.k
-            y: (root.motionT.y + root.eyeY * 0.2) * root.k
-          }
+          Scale { origin.x: creature.width / 2; origin.y: creature.height / 2; xScale: root.f.sx; yScale: root.f.sy },
+          Rotation { origin.x: creature.width / 2; origin.y: creature.height / 2; angle: root.f.rot },
+          Translate { x: root.f.x * root.k; y: root.f.y * root.k }
         ]
 
         ShaderEffect {
-          id: body
-          readonly property real padCss: 190
-          width: (root.diameter + 2 * padCss) * root.k
+          width: root.f.size * root.k
           height: width
           anchors.centerIn: parent
+          anchors.alignWhenCentered: false
           fragmentShader: Qt.resolvedUrl("glitch.frag.qsb")
 
-          property color primary: root.color1
-          property color secondary: root.color2
-          property color bg: root.bgColor
-          property real itemPx: root.diameter + 2 * padCss
-          property real diameter: root.diameter
-          property real glowBlur: Math.min(130, root.baseGlow + 80 * root.voice)
-          property real glowAlpha: 0.25 + 0.22 * root.voice
-          property real pattern: root.patterns[root.pattern] !== undefined ? root.patterns[root.pattern] : 0
-          property real pattern2: root.patterns[root.prevPattern] !== undefined ? root.patterns[root.prevPattern] : 0
-          property real patMix: root.patMix
-          property point eye: Qt.point(root.eyeX, root.eyeY)
-          property real lens: (0.62 + 0.06 * root.voice) * root.lid
-          property real lensSize: 30 + root.energy * 8 + 7 * root.voice
-          property real eyeGlow: (0.62 + (root.sayStart >= 0 ? 0.3 * root.voice : 0)) * (0.2 + 0.8 * root.lid)
           property real aa: 1 / (root.k * (panel.screen ? panel.screen.devicePixelRatio : 1))
-          property point scroll: Qt.point(root.scrollX, root.scrollY)
-          property real ringPhase: root.ringPhase
-          property real swellPhase: root.swellPhase
-          property real swellDrift: root.swellDrift
-          property real reveal: root.reveal
-          property real flash: root.flash
-          property real wobble: root.mode === "listening" && !root.reduceMotion ? 0.010 * root.voiceFast : 0
-          property real wobblePhase: root.clock
-          property real radar: 0.36 * root.radarAmt
-          property real radarAngle: root.radarAngle
-          property real comet: root.cometAmt
-          property real cometAngle: root.cometAngle
-          property real tide: root.ctx
-          property real tideShow: root.workAlpha
-          property real tidePhase: root.clock
-          property vector4d pings: root.pings
-          property real pingDir: root.pingDir
-          property real ring: root.mood === "excited" ? root.excitedRing : 0
-        }
-
-        Repeater {
-          model: Math.min(root.ticks, 39)
-          Rectangle {
-            required property int index
-            readonly property real fresh: index === (root.ticks - 1) % 39 ? Math.exp(-(root.clock - root.tickAt) * 3) : 0
-            readonly property real a: -Math.PI / 2 + index * 0.161
-            readonly property real orbit: (root.diameter / 2 + 10) * root.k
-            width: (6.6 + 3.8 * fresh) * root.k
-            height: width
-            radius: width / 2
-            color: Qt.tint(root.color2, Qt.rgba(1, 1, 1, 0.55))
-            opacity: root.workAlpha * (0.55 + 0.45 * fresh)
-            x: creature.width / 2 + Math.cos(a) * orbit - width / 2
-            y: creature.height / 2 + Math.sin(a) * orbit - height / 2
-          }
-        }
-
-        Repeater {
-          model: root.moons.length
-          Item {
-            required property int index
-            readonly property var m: root.moons[index] || { born: 0, back: -1, w: 1, ph: 0, rad: 40 }
-            readonly property real out: root.smooth((root.clock - m.born) / 0.7)
-            readonly property real home: m.back < 0 ? 0 : root.smooth((root.clock - m.back) / 0.5)
-            readonly property real orbit: ((root.diameter / 2 + m.rad * out) * (1 - home) + root.diameter / 4 * home) * root.k
-            readonly property real a: m.ph + m.w * (root.clock - m.born)
-            x: creature.width / 2 + Math.cos(a) * orbit
-            y: creature.height / 2 + Math.sin(a) * orbit
-            Rectangle {
-              width: 26 * root.k; height: width; radius: width / 2
-              anchors.centerIn: parent
-              color: root.color2
-              opacity: 0.16 * parent.out * (1 - parent.home)
-            }
-            Rectangle {
-              width: 9.2 * (0.4 + 0.6 * parent.out) * (1 - 0.4 * parent.home) * root.k; height: width; radius: width / 2
-              anchors.centerIn: parent
-              color: Qt.tint(root.color2, Qt.rgba(1, 1, 1, 0.55))
-              opacity: 0.95 * (1 - parent.home)
-            }
-          }
-        }
-
-        Rectangle {
-          visible: root.mood === "surprised"
-          width: 16 * root.k
-          height: 32 * root.k
-          radius: width / 2
-          color: Qt.rgba(1, 1, 1, 0.5)
-          anchors.horizontalCenter: parent.horizontalCenter
-          y: parent.height / 2 - root.diameter * root.k / 2 - 32 * root.k - 40 * root.k * root.swing(root.pillPhase)
+          property color primary: root.rgba(root.u.primary)
+          property color secondary: root.rgba(root.u.secondary)
+          property color bg: root.rgba(root.u.bg)
+          property real itemPx: root.u.itemPx
+          property real diameter: root.u.diameter
+          property real glowBlur: root.u.glowBlur
+          property real glowAlpha: root.u.glowAlpha
+          property real pattern: root.u.pattern
+          property real pattern2: root.u.pattern2
+          property real patMix: root.u.patMix
+          property point eye: root.v2(root.u.eye)
+          property real lens: root.u.lens
+          property real lensSize: root.u.lensSize
+          property real eyeGlow: root.u.eyeGlow
+          property point scroll: root.v2(root.u.scroll)
+          property real ringPhase: root.u.ringPhase
+          property real swellPhase: root.u.swellPhase
+          property real swellDrift: root.u.swellDrift
+          property real reveal: root.u.reveal
+          property real flash: root.u.flash
+          property real wobble: root.u.wobble
+          property real wobblePhase: root.u.wobblePhase
+          property real radar: root.u.radar
+          property real radarAngle: root.u.radarAngle
+          property real comet: root.u.comet
+          property real cometAngle: root.u.cometAngle
+          property real tide: root.u.tide
+          property real workShow: root.u.workShow
+          property real tidePhase: root.u.tidePhase
+          property vector4d pings: root.v4(root.u.pings)
+          property real pingDir: root.u.pingDir
+          property real ring: root.u.ring
+          property real ticks: root.u.ticks
+          property point tickFresh: root.v2(root.u.tickFresh)
+          property vector4d moon0: root.v4(root.u.moon0)
+          property vector4d moon1: root.v4(root.u.moon1)
+          property vector4d moon2: root.v4(root.u.moon2)
+          property vector4d moon3: root.v4(root.u.moon3)
+          property vector4d moon4: root.v4(root.u.moon4)
+          property vector4d moon5: root.v4(root.u.moon5)
+          property point pill: root.v2(root.u.pill)
         }
       }
     }
   }
-
-  function smooth(u) { u = Math.max(0, Math.min(1, u)); return u * u * (3 - 2 * u) }
 }

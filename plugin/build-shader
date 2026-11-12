@@ -1,0 +1,22 @@
+#!/bin/bash
+# Builds glitch.frag.qsb from orb.glsl: Qt's header, with the uniforms in its block.
+set -euo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+qsb=${QSB:-}
+if [[ -z $qsb ]]; then
+  for c in /usr/lib/qt6/bin/qsb "${XDG_DATA_HOME:-$HOME/.local/share}/glitch/qsb/usr/lib/qt6/bin/qsb"; do
+    [[ -x $c ]] && { qsb=$c; break; }
+  done
+fi
+[[ -n $qsb ]] || { echo "qsb isn't installed (pacman -S qt6-shadertools)" >&2; exit 1; }
+frag=$(mktemp --suffix=.frag)
+trap 'rm -f "$frag"' EXIT
+awk '
+  /^uniform / { sub(/^uniform /, "    "); u = u $0 "\n"; next }
+  { b = b $0 "\n" }
+  END {
+    printf "#version 440\nlayout(location = 0) in vec2 qt_TexCoord0;\nlayout(location = 0) out vec4 fragColor;\n"
+    printf "layout(std140, binding = 0) uniform buf {\n    mat4 qt_Matrix;\n    float qt_Opacity;\n%s};\n%s", u, b
+  }' "$here/orb.glsl" >"$frag"
+LD_LIBRARY_PATH="$(dirname "$(dirname "$(dirname "$qsb")")")${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+  "$qsb" --qt6 -o "$here/glitch.frag.qsb" "$frag"

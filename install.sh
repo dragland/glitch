@@ -137,15 +137,9 @@ fi
 
 step "Orb shader"
 qsb_out="$REPO/plugin/glitch.frag.qsb"
-if [[ ! -s $qsb_out || $REPO/plugin/glitch.frag -nt $qsb_out ]]; then
-  if [[ -x /usr/lib/qt6/bin/qsb ]]; then
-    /usr/lib/qt6/bin/qsb --qt6 -o "$qsb_out" "$REPO/plugin/glitch.frag"
-  elif [[ -x $DATA/qsb/usr/lib/qt6/bin/qsb ]]; then
-    LD_LIBRARY_PATH="$DATA/qsb/usr/lib" "$DATA/qsb/usr/lib/qt6/bin/qsb" --qt6 -o "$qsb_out" "$REPO/plugin/glitch.frag"
-  else
-    die "glitch.frag changed but qsb isn't installed (pacman -S qt6-shadertools)"
-  fi
-  ok "compiled glitch.frag"
+if [[ ! -s $qsb_out || $REPO/plugin/orb.glsl -nt $qsb_out ]]; then
+  XDG_DATA_HOME="$(dirname "$DATA")" "$REPO/plugin/build-shader" || die "couldn't build the orb shader from orb.glsl"
+  ok "compiled orb.glsl"
 else
   ok "glitch.frag.qsb is current"
 fi
