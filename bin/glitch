@@ -59,9 +59,9 @@ set_state() {
   omarchy-shell -q glitch set "$json" >/dev/null 2>&1 || true
 }
 
-# A live signal for the orb (see the list at the top of plugin/Glitch.qml):
-# one line appended to orb.events, which the orb tails. Cheap enough to call
-# for every streamed word.
+# A live signal for the orb (listed at the top of plugin/Glitch.qml): one line
+# appended to orb.events, which the orb tails. It is a file because IPC costs a
+# process per call, and this runs for every streamed word.
 ev() { printf '%s\n' "$*" >>"$RT/orb.events"; }
 
 # The current session id, if it's fresh and belongs to agent $1 (sid.agent):
@@ -544,7 +544,7 @@ cmd_turn() {
       last_decide=$EPOCHSECONDS
       ;;
     toolend) ev "end $rest" ;;
-    # (digit counts are bounded: bash arithmetic wraps past 2^63)
+    # Digit counts are bounded because bash arithmetic wraps past 2^63.
     ctx) [[ -n $window && $rest =~ ^[0-9]{1,12}$ ]] && ev "ctx $(printf '0.%03d' $((rest * 1000 / window > 999 ? 999 : rest * 1000 / window)))" ;;
     window)
       # Known only when a turn ends, so the tide uses the last turn's. Kept
@@ -639,7 +639,7 @@ cmd_turn() {
     sleep 0.4 # let the beeps lead into the voice
     [[ -s $RT/say.env ]] && ev "say $(<"$RT/say.env")" # the orb moves with its own voice
     if play "$RT/say.wav" && [[ $state == speaking && -s $RT/say.wav ]]; then
-      REACTION='{"voice":"bubble","energy":0.4,"mood":"calm"}' cue --notes 360 # one low bubble: done
+      REACTION='{"voice":"bubble","energy":0.4,"mood":"calm"}' cue --notes 360 # the closing bubble
     fi
   fi
 

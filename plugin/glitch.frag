@@ -78,7 +78,7 @@ vec4 dots(vec2 p, float period, float r) {
                 pm(secondary, 1.0 - up(d2, r - aa * 0.5, r + aa * 0.5)));
 }
 
-// Jev's wave band: a soft ramp up to a crisp crest, the two colours taking turns.
+// Jev's wave band: a soft ramp up to a crisp crest, alternating the two colours.
 vec4 bands(float v) {
     float m = mod(v, 40.0);
     float a1 = (m < 10.0) ? m / 10.0 : (m < 11.0 ? 11.0 - m : 0.0);
@@ -127,7 +127,7 @@ vec4 patternColor(int pat, vec2 q, vec2 q0, float R) {
         float g = clamp(dot(q0 / (2.0 * R), vec2(0.70710678)) * 0.70710678 + 0.5, 0.0, 1.0);
         return vec4(mix(primary.rgb, secondary.rgb, g) * turbulence(q + R), 1.0);
     }
-    // fine: the dot lattice at 60% size and 40% strength, like frosted glass.
+    // fine: the dot lattice at 60% size and 40% strength.
     return dots(q + 6.0, 12.0, 1.55) * 0.4;
 }
 
@@ -192,7 +192,7 @@ void main() {
             body = over(vec4(0.275 * tideShow * exp(-0.5 * ld * ld)), body);
         }
 
-        // Inset glow, then the pupil's own light.
+        // Inset glow, then the glow at the gaze point.
         float edge = R - dn;
         body = over(pm(secondary, 0.25 * exp(-0.5 * (edge * edge) / 400.0)), body);
         float gs = lensSize * 0.8;
@@ -202,7 +202,7 @@ void main() {
         if (radar > 0.0)
             body.rgb += primary.rgb * exp(-mod(radarAngle - ang, TAU) / 0.8) * radar * (1.0 - up(dn, R - 3.0, R - 2.0));
 
-        // A soft luminous rim that runs on into the outer glow; it flashes on an edit.
+        // A soft rim that continues into the outer glow; it flashes on an edit.
         vec4 rim = vec4(mix(secondary.rgb, vec3(1.0), 0.8 * flash), secondary.a);
         float rd = (R - dn) / 4.5;
         body = over(pm(rim, 0.55 * exp(-0.5 * rd * rd)), body);

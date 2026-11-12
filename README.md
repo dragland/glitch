@@ -8,21 +8,21 @@ reply waits on a sticky card; click it to open the conversation.
 
 The creature grew out of Yohei Nakajima's [Beep Jev](https://beepjev.replit.app):
 its patterns, palettes, motions and beep synth. A decision model (local by
-default) stands in for Jev, picking its look and sound as the agent works. On top of
-that it moves with what is actually happening:
+default) stands in for Jev, picking its look and sound as the agent works. The
+orb also moves with what is happening:
 
-- **Your voice and its own.** The halo follows the mic while you talk and its
-  own voice while it answers; rings travel in for you and out for it.
-- **The eye is the pattern.** Whatever texture it wears is centred and
-  magnified where it's looking. It looks at you while you talk, at the work
-  while it works, and blinks.
-- **Working.** The pattern drifts with the text as it streams. Reading shows
-  a radar sweep, an edit flashes the rim (and fills in cells on the checker),
-  and a comet runs the rim while a command or subagent is out.
-- **The turn.** One pale tick on the rim per tool call, a moon per subagent
-  (it comes home with a ping), and a faint tide for how full the context is
-  (Claude only: Codex doesn't report it). All of it fades when it starts to
-  speak.
+- **Voice.** The halo follows the mic while you talk and its own voice while
+  it answers. Rings travel inward for you and outward for it.
+- **The eye is the pattern.** The pattern is centred and magnified at the
+  point it looks at: the middle while you talk, the work while it works. It
+  blinks.
+- **Working.** The pattern drifts as text streams. Reading shows a radar
+  sweep, an edit flashes the rim and fills in checker cells, and a comet runs
+  the rim while a command or subagent is out.
+- **The turn.** One pale tick appears on the rim per tool call, and a moon
+  orbits per subagent, returning with a ping. A faint tide shows how full the
+  context is (Claude only; Codex doesn't report it). All of it fades when the
+  orb starts to speak.
 
 ## Install
 
@@ -117,6 +117,6 @@ glitch itself: see AGENTS.md.
 ## Credits
 
 The creature's patterns, palettes, motions and beep synth come from Beep Jev
-by Yohei Nakajima (ported from the public app's bundle); the decision approach follows his
-[glance](https://github.com/yoheinakajima/glance) and TypeSafe's Jev. This repo
+by Yohei Nakajima (ported from the public app's bundle); the decision approach
+follows his [glance](https://github.com/yoheinakajima/glance) and TypeSafe's Jev. This repo
 is private; check with him before publishing it.

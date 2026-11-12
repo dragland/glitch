@@ -230,7 +230,7 @@ Item {
   }
 
   // The script appends to this file; tail hands each line over as it lands.
-  // (GLITCH_RT points a test instance at a scratch directory)
+  // GLITCH_RT points a test instance at a scratch directory.
   readonly property string runtimeDir: Quickshell.env("GLITCH_RT") || (Quickshell.env("XDG_RUNTIME_DIR") + "/glitch")
   Process {
     running: true
@@ -247,7 +247,7 @@ Item {
   // does), with about 1% of rim give and a 2% stretch.
   property real voice: 0            // smoothed, drives halo and travel
   property real voiceFast: 0        // nearly raw, drives the give
-  property real micMax: 0.02        // running peak (linear; -34 dBFS at least), so a quiet voice still fills the range
+  property real micMax: 0.02        // running peak, linear, never under -34 dBFS: a quiet voice still fills the range
   property var sayEnv: []
   property real sayHz: 50
   property real sayStart: -1
@@ -279,7 +279,7 @@ Item {
 
   // ---- the eye -------------------------------------------------------------------
   // The gaze point the pattern is centred on. It follows the pointer like the
-  // original's eye, attends to you while you talk, and goes to the work.
+  // original's eye, rests on centre while you talk, and goes to the work.
   property real cursorPctX: 50
   property real cursorPctY: 50
   property double lastMouseMove: 0
@@ -383,7 +383,6 @@ Item {
       root.eyeX += (root.eyeTarget.x - root.eyeX) * f
       root.eyeY += (root.eyeTarget.y - root.eyeY) * f
 
-      // Voice level.
       var target = 0
       if (root.mode === "listening") {
         // The monitor's peak is the cube root of the sample peak; undo that, or
@@ -413,7 +412,7 @@ Item {
       var flow = root.pendingChars * (1 - Math.exp(-dt / 0.25))
       root.pendingChars -= flow
       root.tokenRate = dt > 0 ? Math.min(1.5, flow / dt / 220) : 0
-      if (root.working && !root.reduceMotion) {  // (reset each turn, so it stays small)
+      if (root.working && !root.reduceMotion) {  // scroll resets each turn, so it stays small
         root.scrollX += 30 * root.tokenRate * dt
         root.scrollY += 16 * root.tokenRate * dt
       }
@@ -434,12 +433,12 @@ Item {
       }
       root.pings = Qt.vector4d(u[0], u[1], u[2], u[3])
 
-      // A subagent that came home: one ping, a little glow, and it's gone.
+      // A subagent's moon that has come home is removed, with a bump and one ping.
       var ms = root.moons, keep = ms.filter(m => m.back < 0 || root.clock - m.back < 0.5)
       if (keep.length !== ms.length) {
         root.moons = keep
         root.bump(0.3)
-        if (root.mode !== "listening") root.ping(1)  // while you talk, the rings are yours
+        if (root.mode !== "listening") root.ping(1)  // while listening, pings travel inward only
       }
     }
   }
@@ -631,7 +630,7 @@ Item {
           }
         }
 
-        // Moons: subagents out working. Plain and pale; one going home is a single ping.
+        // Moons: subagents out working. A returning one fires a single ping.
         Repeater {
           model: root.moons.length
           Item {
@@ -643,7 +642,7 @@ Item {
             readonly property real a: m.ph + m.w * (root.clock - m.born)
             x: creature.width / 2 + Math.cos(a) * orbit
             y: creature.height / 2 + Math.sin(a) * orbit
-            Rectangle {  // a soft glow
+            Rectangle {  // glow
               width: 26 * root.k; height: width; radius: width / 2
               anchors.centerIn: parent
               color: root.color2
