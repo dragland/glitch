@@ -6,10 +6,22 @@ default) does it headless, while a little creature at the bottom of the screen
 shows what it's doing, beeps its mood and speaks a one-line answer. The full
 reply waits on a sticky card; click it to open the conversation.
 
-The creature is a port of Yohei Nakajima's [Beep Jev](https://beepjev.replit.app):
-its patterns, palettes, motions, mouse-following eye and beep synth. A decision
-model (local by default) stands in for Jev, picking its reaction as the agent
-works.
+The creature grew out of Yohei Nakajima's [Beep Jev](https://beepjev.replit.app):
+its patterns, palettes, motions and beep synth. A decision model (local by
+default) stands in for Jev, picking its mood as the agent works. On top of
+that it moves with what is actually happening:
+
+- **Your voice and its own.** The halo follows the mic while you talk and its
+  own voice while it answers; rings travel in for you and out for it.
+- **The eye is the pattern.** Whatever texture it wears is centred and
+  magnified where it's looking. It looks at you while you talk, at the work
+  while it works, and blinks.
+- **Working.** The pattern drifts at the speed text is streaming and stops
+  when it stops. Reading shows a radar sweep, each edit fills in cells, and a
+  comet runs the rim while a command or subagent is out.
+- **The turn.** One pale tick on the rim per tool call, a moon per subagent
+  (it comes home with a ping), and a faint tide for how full the context is.
+  All of it fades when it starts to speak.
 
 ## Install
 
@@ -81,11 +93,15 @@ Super+D ─► voxtype (local Whisper) ─► transcript ─► agent, headless,
                                                        │ tool steps, streamed words   │ reply ending in SAY: / MOOD:
                                                        ▼                              ▼
                        libexec/decide ─► reaction ─► orb      Piper speaks SAY · card holds the reply
+                       live signals (orb.events) ───► orb
 ```
 
 - `bin/glitch`: the whole pipeline (keys, sessions, agent adapters, approvals,
   speech, reply card). Its log is `$XDG_RUNTIME_DIR/glitch/glitch.log`.
 - `plugin/`: the Omarchy shell plugin that draws the orb (`glitch.frag` on the GPU).
+  It takes the reaction over IPC and live signals (streamed text, tool calls
+  out and back, context, the spoken line's loudness) from
+  `$XDG_RUNTIME_DIR/glitch/orb.events`; the mic level it reads from PipeWire.
 - `libexec/`: `cue` (beeps), `speak` (Piper), `decide` (the decision model:
   `local`, `jev` or `openai`), `preview` (cycles orb styles while you tune
   `reactions.json`), `desktop-root` (desktop control's root half).

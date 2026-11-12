@@ -113,6 +113,7 @@
       "energy": 0.7,
       "mood": "happy"
     },
+    "clear": { "palette": "mint", "pattern": "fine", "motion": "breathe", "voice": "chirp", "basePitch": 440, "beepRate": 5, "energy": 0.45, "mood": "calm" },
     "calm": {
       "palette": "ocean",
       "pattern": "waves",

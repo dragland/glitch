@@ -4,13 +4,28 @@ then wait on a FIFO for the line to say, synthesize it (~0.1-0.2 s) and exit.
 
     speak VOICE.onnx FIFO OUT.wav
 
-OUT.wav appears atomically. Empty input (or the FIFO closing unwritten) exits
-without output.
+OUT.wav appears atomically, after OUT.env beside it: the line's loudness
+envelope ("<hz> <0..99> ..."), which the orb moves to while the wav plays.
+Empty input (or the FIFO closing unwritten) exits without output.
 """
 
+import math
 import os
 import sys
 import wave
+from array import array
+
+ENV_HZ = 50
+
+
+def envelope(path):
+    """Loudness per 1/ENV_HZ s, 0..99, where 99 is about the loudest syllable."""
+    with wave.open(path, "rb") as w:
+        hop = w.getframerate() // ENV_HZ
+        pcm = array("h", w.readframes(w.getnframes()))[::w.getnchannels()]
+    rms = [math.sqrt(sum(v * v for v in pcm[i:i + hop]) / hop) for i in range(0, len(pcm) - hop + 1, hop)]
+    top = sorted(rms)[int(len(rms) * 0.97)] if rms else 0
+    return [min(99, int(99 * v / top)) if top else 0 for v in rms]
 
 from piper import PiperVoice
 
@@ -25,6 +40,10 @@ def main():
     tmp = out + ".tmp"
     with wave.open(tmp, "wb") as w:
         voice.synthesize_wav(text, w)
+    env = os.path.splitext(out)[0] + ".env"
+    with open(env + ".tmp", "w") as f:
+        f.write(" ".join(map(str, [ENV_HZ] + envelope(tmp))))
+    os.replace(env + ".tmp", env)
     os.replace(tmp, out)
     return 0
 

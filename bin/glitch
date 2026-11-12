@@ -59,6 +59,11 @@ set_state() {
   omarchy-shell -q glitch set "$json" >/dev/null 2>&1 || true
 }
 
+# A live signal for the orb (see the list at the top of plugin/Glitch.qml):
+# one line appended to orb.events, which the orb tails. Cheap enough to call
+# for every streamed word.
+ev() { printf '%s\n' "$*" >>"$RT/orb.events"; }
+
 # The current session id, if it's fresh and belongs to agent $1 (sid.agent):
 # switching agents starts a new session rather than resuming a foreign id.
 current_sid() {
@@ -98,7 +103,7 @@ cue() {
 # works), then says one line through a FIFO when the reply arrives.
 
 speech_warm() {
-  rm -f "$RT/say.wav" "$RT/say.fifo"
+  rm -f "$RT/say.wav" "$RT/say.env" "$RT/say.fifo"
   [[ $SPEAK == 1 && -x $PY && -f $VOICE ]] || return 0
   mkfifo "$RT/say.fifo" || return 0
   "$PY" -I "$SPEAK_HELPER" "$VOICE" "$RT/say.fifo" "$RT/say.wav" </dev/null >/dev/null 2>>"$RT/glitch.log" 8>&- 9>&- &
@@ -115,13 +120,17 @@ speech_render() {
   SPEAK_PID=""
 }
 
-# Play a rendered file; `glitch hush` (or any key press) stops it.
+# Play a rendered file; `glitch hush` (or any key press) stops it. Fails if it
+# was cut short.
 play() {
+  local rc
   [[ -s $1 ]] || return 0
   pw-play "$1" 2>/dev/null 8>&- 9>&- &
   echo $! >"$RT/speak.pid"
   wait $! 2>/dev/null
+  rc=$?
   rm -f "$RT/speak.pid"
+  return $rc
 }
 
 hush() {
@@ -129,6 +138,7 @@ hush() {
   pid=$(cat "$RT/speak.pid" 2>/dev/null) || return 1
   kill "$pid" 2>/dev/null
   rm -f "$RT/speak.pid"
+  ev hush
 }
 
 # --- the reply card -------------------------------------------------------------
@@ -224,10 +234,12 @@ stop_live() {
 
 # --- agent adapters ---------------------------------------------------------------
 # An adapter reads the prompt on stdin, takes an optional session id, and emits
-# lines: "sid <id>", "mode <permission mode>", "tool <category>\t<label>",
-# "words <text>", "say <text>", "mood <word>", "result <json string>",
-# "error <text>", "denied <n>", then "exit <status>" last. Tool categories:
-# look, make, run, delegate.
+# lines: "sid <id>", "mode <permission mode>", "tool <category>\t<label>\t<id>",
+# "toolend <id>", "words <text>", "ctx <tokens in context>", "window <context
+# window>", "say <text>", "mood <word>", "result <json string>", "error <text>",
+# "denied <n>", then "exit <status>" last. Tool categories: look, make, run,
+# delegate. Only the agent's own tool calls count: a subagent's are its moon's
+# business.
 
 adapter_claude() {
   local sid=${1:-} args
@@ -247,7 +259,7 @@ adapter_claude() {
     def clip(n): if length > n then .[0:n] + "…" else . end;
     def tlabel: .name + (
       (.input.file_path // .input.path // .input.command // .input.pattern // .input.url // .input.description // "")
-      | tostring | split("\n")[0] | sub("^/home/[^/]+/"; "~/") | if . == "" then "" else ": " + clip(48) end);
+      | tostring | split("\n")[0] | gsub("\t"; " ") | sub("^/home/[^/]+/"; "~/") | if . == "" then "" else ": " + clip(48) end);
     def tcat: .name as $n |
       if ($n | test("^(Read|Glob|Grep|LS|WebFetch|WebSearch|ToolSearch)$")) then "look"
       elif ($n | test("^(Edit|MultiEdit|Write|NotebookEdit)$")) then "make"
@@ -257,9 +269,14 @@ adapter_claude() {
     if .type == "stream_event" then
       (.event.delta // {} | (.text // .thinking // empty) | "words \(gsub("\\s+"; " "))")
     elif .type == "system" and .subtype == "init" then "sid \(.session_id)", "mode \(.permissionMode // "?")"
-    elif .type == "assistant" then (.message.content[]? | select(.type == "tool_use") | "tool \(tcat)\t\(tlabel)")
+    elif .type == "assistant" and .parent_tool_use_id == null then
+      (.message.content[]? | select(.type == "tool_use") | "tool \(tcat)\t\(tlabel)\t\(.id)"),
+      (.message.usage // empty | "ctx \((.input_tokens // 0) + (.cache_read_input_tokens // 0) + (.cache_creation_input_tokens // 0))")
+    elif .type == "user" and .parent_tool_use_id == null then
+      (.message.content | arrays | .[] | objects | select(.type == "tool_result") | "toolend \(.tool_use_id)")
     elif .type == "result" then
       "sid \(.session_id)",
+      (([.modelUsage[]?.contextWindow] | map(select(. != null)) | max) // empty | "window \(.)"),
       (if (.permission_denials // [] | length) > 0 then "denied \(.permission_denials | length)" else empty end),
       (if .is_error then "error \((.result | select(. != "")) // .subtype // "error" | tostring | gsub("\n"; " "))"
        else (.result // "" | split("\n")) as $ls |
@@ -288,11 +305,11 @@ adapter_codex() {
   timeout --signal=INT --kill-after=15 "$TURN_TIMEOUT" codex "${args[@]}" 2>>"$RT/glitch.log" 9>&- |
     jq --unbuffered -nrR --arg cwd "$PWD/" '
     def clip(n): if length > n then .[0:n] + "…" else . end;
-    def short: tostring | split("\n")[0] | ltrimstr($cwd) | sub("^/home/[^/]+/"; "~/") | clip(48);
+    def short: tostring | split("\n")[0] | gsub("\t"; " ") | ltrimstr($cwd) | sub("^/home/[^/]+/"; "~/") | clip(48);
     def unwrap: sub("^(/usr)?/bin/(ba|z)?sh -l?c "; "") | sub("^\u0027(?<c>.*)\u0027$"; "\(.c)") | sub("^\"(?<c>.*)\"$"; "\(.c)");
     def tagline(k): [.[] | select(test("^\\s*" + k + ":"))] | last // "" | sub("^\\s*" + k + ":\\s*"; "");
     def plain: split("\n") | map(select(test("^\\s*(SAY|MOOD):") | not)) | join("\n") | sub("\\s+$"; "");
-    def tool: if .type == "command_execution" then (.command | unwrap) as $c |
+    def toolline: if .type == "command_execution" then (.command | unwrap) as $c |
         (if ($c | test("^\\s*(ls|cat|head|tail|rg|grep|find|fd|tree|wc|stat|file|pwd|sed -n|git (status|log|diff|show))\\b"))
          then "look" else "run" end) + "\tShell: \($c | short)"
       elif .type == "file_change" then
@@ -303,6 +320,7 @@ adapter_codex() {
       elif .type == "collab_tool_call" then
         if .tool == "spawn_agent" then "delegate\tAgent: \(.prompt // "" | short)" else empty end
       else empty end;
+    def tool: .id as $id | toolline | "tool \(.)\t\($id)";
     # Some items arrive only as item.completed (Codex batches shell calls
     # without an item.started), so a tool line is emitted on whichever comes first.
     foreach (inputs | fromjson? // empty) as $e ({seen: {}, last: "", denied: 0};
@@ -317,7 +335,8 @@ adapter_codex() {
       elif .type == "item.completed" then .item |
         if .type == "agent_message" or .type == "reasoning" then
           (.text | plain | select(. != "") | "words \(gsub("\\s+"; " "))")
-        elif $s.seen[.id] then empty else tool end
+        elif $s.seen[.id] then (tool | "toolend \(split("\t")[2])")
+        else tool, (tool | "toolend \(split("\t")[2])") end
       elif .type == "turn.failed" then "error \(.error.message // "turn failed" | gsub("\n"; " "))"
       elif .type == "turn.completed" then
         (if $s.denied > 0 then "denied \($s.denied)" else empty end),
@@ -396,7 +415,7 @@ cmd_start() {
   voxtype record start --file="$RT/utterance.txt" --no-osd 2>>"$RT/glitch.log"
   REACTION=$(reaction listening)
   set_state listening
-  cue --beeps 1
+  cue --notes 440,587 # the mic opens: two chirps up
   # Watchdog: a forgotten recording sends itself just before voxtype's own cap.
   setsid bash -c "sleep $((RECORD_LIMIT - 10)); [[ \$(cat '$RT/recording' 2>/dev/null) == $stamp ]] && exec '$0' stop" \
     </dev/null >/dev/null 2>&1 8>&- 9>&- &
@@ -416,7 +435,7 @@ cmd_stop() {
   fi
   REACTION=$(reaction listening)
   set_state transcribing
-  cue --beeps 2
+  cue --notes 587,440 # and closes: two down
   out=$(voxtype record stop --wait --json --wait-file "$RT/utterance.txt" --timeout 30 2>>"$RT/glitch.log")
   rc=$?
   text=$(tr '\n' ' ' 2>/dev/null <"$RT/utterance.txt" | sed 's/^ *//;s/ *$//')
@@ -464,6 +483,7 @@ cmd_stop() {
 cmd_turn() {
   local text=$1 fresh=${2:-false} agent kind rest result="" say="" mood="" denied=0
   local failed="" exit_code="" replied=false body words="" activity="" last_decide=0 fin
+  local cat id window contour
   exec 9>"$RT/turn.lock"
   if ! flock -n 9; then
     set_state thinking "waiting for the last request"
@@ -476,6 +496,10 @@ cmd_turn() {
   [[ $fresh == true ]] || SID=$(current_sid "$agent") || SID=""
   log "turn agent=$agent sid=${SID:-new} text=$text"
   rm -f "$RT/live.json" "$RT/live.in"
+  (($(stat -c %s "$RT/orb.events" 2>/dev/null || echo 0) > 200000)) && : >"$RT/orb.events"
+  window=$(cat "$DATA/ctx.window" 2>/dev/null)
+  [[ $window =~ ^[1-9][0-9]*$ ]] || window=200000
+  ev turn
   speech_warm
   REACTION=$(reaction thinking)
   set_state thinking "$text"
@@ -495,16 +519,24 @@ cmd_turn() {
       ;;
     mode) log "permission mode $rest" ;;
     tool)
-      activity=${rest#*$'\t'}
+      IFS=$'\t' read -r cat activity id <<<"$rest"
       # Instant feedback from the table (or the last live decision), then let
       # the model refine it.
-      REACTION=$(cat "$RT/live.json" 2>/dev/null || reaction "tool.${rest%%$'\t'*}")
+      REACTION=$(cat "$RT/live.json" 2>/dev/null || reaction "tool.$cat")
       set_state tool "$activity"
+      ev "tool ${id:-t$EPOCHREALTIME} $cat"
       cue --beeps 1
       live_decide "$text" "$activity" "$words"
       last_decide=$EPOCHSECONDS
       ;;
+    toolend) ev "end $rest" ;;
+    ctx) [[ $rest =~ ^[0-9]+$ ]] && ev "ctx $(printf '0.%03d' $((rest * 1000 / window > 999 ? 999 : rest * 1000 / window)))" ;;
+    window)
+      # Known only when a turn ends, so the tide uses the last turn's.
+      [[ $rest =~ ^[1-9][0-9]*$ ]] && window=$rest && write_atomic "$DATA/ctx.window" "$rest"
+      ;;
     words)
+      ev "tok ${#rest}"
       words+="$rest "
       ((${#words} > 600)) && words=${words: -600}
       if ((EPOCHSECONDS - last_decide >= LIVE_WORDS_INTERVAL)); then
@@ -582,9 +614,17 @@ cmd_turn() {
   local look_pid=$!
   # Don't talk over a recording that started meanwhile.
   if [[ ! -e $RT/recording ]]; then
-    cue
+    # The beep phrase follows the sentence's melody: up for a question, down
+    # for bad news, an arch otherwise.
+    contour=arch
+    [[ $say == *\? ]] && contour=rise
+    [[ -n $failed || $mood == sorry || $mood == concerned ]] && contour=fall
+    cue --contour "$contour"
     sleep 0.4 # let the beeps lead into the voice
-    play "$RT/say.wav"
+    [[ -s $RT/say.env ]] && ev "say $(<"$RT/say.env")" # the orb moves with its own voice
+    if play "$RT/say.wav" && [[ $state == speaking && -s $RT/say.wav ]]; then
+      REACTION='{"voice":"bubble","energy":0.4,"mood":"calm"}' cue --notes 360 # one low bubble: done
+    fi
   fi
 
   wait "$look_pid" 2>/dev/null

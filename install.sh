@@ -142,8 +142,14 @@ step "Orb shader"
 # rebuild only when the source is newer, so installs don't dirty the checkout.
 qsb_out="$REPO/plugin/glitch.frag.qsb"
 if [[ ! -s $qsb_out || $REPO/plugin/glitch.frag -nt $qsb_out ]]; then
-  [[ -x /usr/lib/qt6/bin/qsb ]] || die "glitch.frag changed but qsb isn't installed (pacman -S qt6-shadertools)"
-  /usr/lib/qt6/bin/qsb --qt6 -o "$qsb_out" "$REPO/plugin/glitch.frag"
+  # qsb from the system, or from a copy of the package unpacked under $DATA/qsb (no root needed).
+  if [[ -x /usr/lib/qt6/bin/qsb ]]; then
+    /usr/lib/qt6/bin/qsb --qt6 -o "$qsb_out" "$REPO/plugin/glitch.frag"
+  elif [[ -x $DATA/qsb/usr/lib/qt6/bin/qsb ]]; then
+    LD_LIBRARY_PATH="$DATA/qsb/usr/lib" "$DATA/qsb/usr/lib/qt6/bin/qsb" --qt6 -o "$qsb_out" "$REPO/plugin/glitch.frag"
+  else
+    die "glitch.frag changed but qsb isn't installed (pacman -S qt6-shadertools)"
+  fi
   ok "compiled glitch.frag"
 else
   ok "glitch.frag.qsb is current"
