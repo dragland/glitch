@@ -19,13 +19,14 @@ import "orb.mjs" as Orb
 Item {
   id: root
 
-  readonly property var core: Orb.createOrb()
+  readonly property var core: Orb.createOrb({ now: () => root.now() })
   property var f: core.frame()
   readonly property var u: f.uniforms
   readonly property real k: Style.space(128) / 200
 
+  function now() { return Date.now() / 1000 }
   function set(payloadJson) { core.set(payloadJson); f = core.frame() }
-  function event(line) { core.event(line); f = core.frame() }
+  function event(line) { core.event(line) }
   function rgba(c) { return Qt.rgba(c[0], c[1], c[2], c[3]) }
   function v2(a) { return Qt.point(a[0], a[1]) }
   function v4(a) { return Qt.vector4d(a[0], a[1], a[2], a[3]) }
@@ -81,6 +82,19 @@ Item {
     onTriggered: if (!hyprSock.connected) hyprSock.connected = true
   }
 
+  // Frames stop while the monitor sleeps; this wakes the core for its deadlines.
+  readonly property real wakeAt: f.wakeAt
+  onWakeAtChanged: {
+    waker.stop()
+    if (wakeAt < 0) return
+    waker.interval = Math.max(1, Math.ceil((wakeAt - now()) * 1000))
+    waker.start()
+  }
+  Timer {
+    id: waker
+    onTriggered: root.f = root.core.wake()
+  }
+
   FrameAnimation {
     running: root.f.visible
     onTriggered: {
@@ -118,8 +132,8 @@ Item {
     }
     visible: root.f.visible
     anchors { bottom: true }
-    implicitWidth: Math.ceil(760 * root.k)
-    implicitHeight: Math.ceil(760 * root.k)
+    implicitWidth: Math.ceil(Orb.stage.size * root.k)
+    implicitHeight: Math.ceil(Orb.stage.size * root.k)
     color: "transparent"
     WlrLayershell.namespace: "glitch-orb"
     WlrLayershell.layer: WlrLayer.Overlay
@@ -137,7 +151,7 @@ Item {
         id: creature
         width: parent.width
         height: parent.width
-        y: parent.height - 260 * root.k - height / 2
+        y: parent.height - Orb.stage.orbY * root.k - height / 2
         transform: [
           Scale { origin.x: creature.width / 2; origin.y: creature.height / 2; xScale: root.f.sx; yScale: root.f.sy },
           Rotation { origin.x: creature.width / 2; origin.y: creature.height / 2; angle: root.f.rot },
@@ -151,7 +165,7 @@ Item {
           anchors.alignWhenCentered: false
           fragmentShader: Qt.resolvedUrl("glitch.frag.qsb")
 
-          property real aa: 1 / (root.k * (panel.screen ? panel.screen.devicePixelRatio : 1))
+          property real aa: Orb.aa(root.k, panel.screen ? panel.screen.devicePixelRatio : 1)
           property color primary: root.rgba(root.u.primary)
           property color secondary: root.rgba(root.u.secondary)
           property color bg: root.rgba(root.u.bg)

@@ -59,7 +59,17 @@ vec4 over(vec4 top, vec4 under) { return top + under * (1.0 - top.a); }
 vec4 pm(vec4 c, float a) { return vec4(c.rgb * c.a * a, c.a * a); }
 float up(float x, float a, float b) { return clamp((x - a) / max(b - a, 1e-4), 0.0, 1.0); }
 
-float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+// Integer hash of a lattice point, so every GPU draws the same cells. p must be
+// integer-valued; the result is a multiple of 2^-24 in [0, 1).
+uint mix32(uint x) {
+    x ^= x >> 16; x *= 0x7feb352du;
+    x ^= x >> 15; x *= 0x846ca68bu;
+    return x ^ (x >> 16);
+}
+float hash(vec2 p) {
+    ivec2 i = ivec2(p);
+    return float(mix32(uint(i.x) ^ mix32(uint(i.y) + 0x9e3779b9u)) >> 8) * (1.0 / 16777216.0);
+}
 float vnoise(vec2 p) {
     vec2 i = floor(p), f = fract(p);
     vec2 u = f * f * (3.0 - 2.0 * f);
@@ -107,7 +117,7 @@ vec4 patternColor(int pat, vec2 q, vec2 q0, float R) {
         vec2 p = q + 7.0;
         vec2 t = mod(p, 28.0) - 14.0;
         vec3 rgb = (t.x * t.y < 0.0) ? primary.rgb : secondary.rgb;
-        float h = fract(sin(dot(floor(p / 14.0), vec2(12.9898, 78.233))) * 43758.5453);
+        float h = hash(floor(p / 14.0));
         float on = step(h, reveal);
         float fresh = clamp(1.0 - (reveal - h) / 0.10, 0.0, 1.0) * on * flash;
         rgb = mix(rgb, vec3(1.0), fresh * 0.8);

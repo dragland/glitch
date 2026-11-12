@@ -138,7 +138,7 @@ fi
 step "Orb shader"
 qsb_out="$REPO/plugin/glitch.frag.qsb"
 if [[ ! -s $qsb_out || $REPO/plugin/orb.glsl -nt $qsb_out ]]; then
-  XDG_DATA_HOME="$(dirname "$DATA")" "$REPO/plugin/build-shader" || die "couldn't build the orb shader from orb.glsl"
+  "$REPO/plugin/build-shader" || die "couldn't build the orb shader from orb.glsl"
   ok "compiled orb.glsl"
 else
   ok "glitch.frag.qsb is current"

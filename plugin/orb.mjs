@@ -20,16 +20,25 @@
 //   the cursor (percent of the screen), reduced motion, and colours that replace
 //   the reaction's palette ({color1, color2, bg} as "#rrggbb", or null).
 //
-// Units are the orb's CSS px: the stage is 760 square and the orb's centre sits
-// 260 above its bottom edge. A frame (step/frame) holds:
+// createOrb({ now }) takes the host's clock in seconds; the hide deadlines run on
+// it, so they hold while no frames are drawn. Without it they run on step time.
+//
+// Units are the orb's CSS px: the stage is stage.size square and the orb's
+// centre sits stage.orbY above its bottom edge. A frame (step/frame) holds:
 //   visible            draw and keep stepping; false once faded out
+//   wakeAt             when (on the host's clock) to call wake() if no frame has
+//                      been stepped by then, or -1
 //   listening          the host should feed mic()
 //   opacity, scale     the stage's, about the stage centre
 //   sx, sy, rot, x, y  the orb's scale, rotation (degrees, clockwise) and offset,
 //                      applied in that order about the orb centre
 //   size               side of the shader quad, centred on the orb
-//   uniforms           every orb.glsl uniform but aa (one device px in CSS px):
-//                      numbers, and arrays for colours (rgba 0..1) and vectors
+//   uniforms           every orb.glsl uniform but aa (aa(k, dpr) gives it for a
+//                      stage drawn k device-independent px per CSS px): numbers,
+//                      and arrays for colours (rgba 0..1) and vectors
+
+export const stage = { size: 760, orbY: 260 }
+export const aa = (k, dpr) => 1 / (k * dpr)
 
 export const palettes = {
   electric: { color1: "#00f0ff", color2: "#ff0055", bg: "#08080c" },
@@ -44,6 +53,7 @@ export const patterns = { rings: 0, checker: 1, waves: 2, dots: 3, stripes: 4, n
 const motionSeconds = { bounce: 1, orbit: 4, wobble: 2, breathe: 4, jitter: 0.2, still: 1 }
 const lingerSeconds = { done: 4.5, needs_you: 25, error: 9, idle: 1.2 }
 const PAD = 190
+const FADE = 0.4
 const MOONS = 6
 const TICKS = 39
 
@@ -63,12 +73,15 @@ const mixv = (a, b, u) => Array.isArray(a) ? a.map((x, i) => x + (b[i] - x) * u)
 // Timed as Qt Quick times them, so the desktop orb moves as it did: an animation
 // started during a step first moves on the next one.
 let stepping = false
+const begin = o => { o.fresh = stepping }
+const held = o => { if (!o.fresh) return false; o.fresh = false; return true }
 
 function tween(v) { return { v, from: v, to: v, t: 0, dur: 0, ease: linear, key: undefined, fresh: false } }
 function go(tw, to, dur, ease, from) {
   tw.from = from === undefined ? tw.v : from
   tw.v = tw.from
-  tw.to = to; tw.t = 0; tw.dur = dur; tw.ease = ease; tw.fresh = stepping
+  tw.to = to; tw.t = 0; tw.dur = dur; tw.ease = ease
+  begin(tw)
 }
 function follow(tw, to, dur, ease, key) {
   key = key === undefined ? to : key
@@ -77,8 +90,7 @@ function follow(tw, to, dur, ease, key) {
   go(tw, to, dur, ease)
 }
 function advance(tw, dt) {
-  if (tw.dur <= 0) return
-  if (tw.fresh) { tw.fresh = false; return }
+  if (tw.dur <= 0 || held(tw)) return
   tw.t += dt
   const u = Math.min(1, tw.t / tw.dur)
   tw.v = mixv(tw.from, tw.to, tw.ease(u))
@@ -96,19 +108,20 @@ function fires(tm, dt) {
 }
 
 function loop(t) { return { on: false, t, fresh: false } }
-function restart(lp) { lp.t = 0; lp.fresh = stepping }
+function restart(lp) { lp.t = 0; begin(lp) }
 function gate(lp, on) { if (on && !lp.on) restart(lp); lp.on = on }
 
 const swing = t => 0.5 - 0.5 * Math.cos(2 * Math.PI * t)
 const smooth = u => { u = Math.max(0, Math.min(1, u)); return u * u * (3 - 2 * u) }
 const kick = (u, freq, damp) => u <= 0 ? 0 : Math.exp(-damp * u) * Math.sin(freq * u)
 
-export function createOrb() {
+export function createOrb(opts = {}) {
   let mode = "idle", shown = false
   let paletteName = "electric", pattern = "rings", prevPattern = "rings", motion = "breathe", mood = "curious"
   let energy = 0.5, activity = 0, override = null, reduce = false
 
-  let clock = 0
+  let clock = 0, wall = 0, lastStep = 0, hideAt = -1, fadeEnd = -1
+  const now = opts.now || (() => wall)
   let pendingChars = 0, tokenRate = 0, scrollX = 0, scrollY = 0
   let inflight = {}, lookUntil = -1, cometUntil = -1, lookAngle = -0.5
   let edits = 0, editAt = -10, flash = 0, ticks = 0, tickAt = -10
@@ -122,7 +135,8 @@ export function createOrb() {
   let cursorX = 50, cursorY = 50, lastMove = -Infinity, mouseIdle = true
   let eyeX = 0, eyeY = 0, wanderX = 0, wanderY = 0
   let swellPhase = 0, swellDrift = 0, radarAngle = 0, cometAngle = 0
-  let blinkT = -1, blinkFrom = 1, blinkFresh = false, lid = 1
+  const lidBlink = { t: -1, from: 1, fresh: false }
+  let lid = 1
 
   const pal = () => override || palettes[paletteName] || palettes.electric
   const color1 = tween(rgba(pal().color1)), color2 = tween(rgba(pal().color2)), bg = tween(rgba(pal().bg))
@@ -135,7 +149,7 @@ export function createOrb() {
   const tweens = [color1, color2, bg, patMix, baseDiameter, baseGlow, creatureScale, radarAmt, cometAmt, reveal, workAlpha, amp, opacity, scale]
   for (const tw of [baseDiameter, baseGlow, creatureScale, radarAmt, cometAmt, workAlpha, reveal, opacity, scale]) tw.key = tw.v
 
-  const hideTimer = timer(0, false), decayTimer = timer(0.1, true)
+  const decayTimer = timer(0.1, true)
   const blinkTimer = timer(3, true), wanderTimer = timer(1.1, true)
   const phase = loop(0), pill = loop(0), excited = loop(-1)
 
@@ -146,7 +160,14 @@ export function createOrb() {
   const lookOut = () => working() && (countOut("look") > 0 || clock < lookUntil)
   const toolOut = () => working() && (countOut("run") + countOut("delegate") > 0 || clock < cometUntil)
   const bump = amount => { activity = Math.min(1, activity + amount) }
-  const blink = () => { blinkT = 0; blinkFrom = lid; blinkFresh = stepping }
+  const blink = () => { lidBlink.t = 0; lidBlink.from = lid; begin(lidBlink) }
+  const conceal = t => { shown = false; hideAt = -1; fadeEnd = t + FADE; micRaw = 0 }
+
+  function snap() {
+    for (const tw of tweens) { tw.fresh = false; advance(tw, tw.dur) }
+    lid = 1
+    lidBlink.t = -1
+  }
 
   function ping(dir) {
     let oldest = 0
@@ -167,7 +188,7 @@ export function createOrb() {
     follow(cometAmt, toolOut() ? 1 : 0, 0.3, linear)
     follow(reveal, 0.06 + 0.72 * (1 - Math.exp(-0.5 * Math.max(1, edits))), 0.22, outCubic)
     follow(workAlpha, working() ? 1 : 0, 0.6, linear)
-    follow(opacity, shown ? 1 : 0, 0.4, outCubic)
+    follow(opacity, shown ? 1 : 0, FADE, outCubic)
     follow(scale, shown ? 1 : 0.85, 0.5, outBack)
     run(decayTimer, shown)
     run(wanderTimer, shown)
@@ -175,6 +196,7 @@ export function createOrb() {
     gate(phase, visible())
     gate(pill, mood === "surprised" && visible() && !reduce)
     gate(excited, mood === "excited" && visible() && !reduce)
+    if (!visible()) snap()
   }
 
   function set(payload) {
@@ -197,12 +219,13 @@ export function createOrb() {
     if (s === "tool" || s === "speaking" || (s === "listening" && mode !== "listening")) bump(0.25)
     if (s === "transcribing" && mode === "listening") { dipAt = clock; rushUntil = clock + 0.45; blink() }
     if (s !== mode) sayStart = -1
+    if (mode === "listening" && s !== "listening") micRaw = 0
+    const t = now()
+    if (!visible()) lastStep = t
     mode = s
     shown = true
     const linger = lingerSeconds[s] || 0
-    hideTimer.seconds = linger
-    hideTimer.on = false
-    run(hideTimer, linger > 0)
+    hideAt = linger > 0 ? t + linger : -1
     derive()
   }
 
@@ -257,12 +280,13 @@ export function createOrb() {
     derive()
   }
 
-  function hide() { shown = false; mode = "idle"; derive() }
+  function hide() { conceal(now()); mode = "idle"; derive() }
   function mic(level) { micRaw = Number(level) || 0 }
   function reduceMotion(on) { reduce = !!on; derive() }
   function colors(c) { override = c && c.color1 && c.color2 && c.bg ? c : null; derive() }
 
   function cursor(px, py) {
+    if (!Number.isFinite(px) || !Number.isFinite(py)) return
     px = Math.max(0, Math.min(100, px))
     py = Math.max(0, Math.min(100, py))
     if (Math.abs(px - cursorX) + Math.abs(py - cursorY) > 0.15) {
@@ -287,12 +311,19 @@ export function createOrb() {
   function step(frameTime) {
     if (!visible()) return frame()
     stepping = true
-    try { advanceAll(Math.max(0, frameTime)) } finally { stepping = false }
+    try { advanceAll(Number.isFinite(frameTime) && frameTime > 0 ? frameTime : 0) } finally { stepping = false }
     return frame()
   }
 
+  function wake() {
+    const gap = now() - lastStep
+    return visible() && gap >= 0.05 ? step(gap) : frame()
+  }
+
   function advanceAll(raw) {
-    if (fires(hideTimer, raw)) { shown = false; derive() }
+    wall += raw
+    const t = lastStep = now()
+    if (hideAt >= 0 && t >= hideAt - 1e-9) { conceal(t); derive() }
     if (fires(decayTimer, raw)) { activity = Math.max(0, activity - 0.05); derive() }
     if (fires(blinkTimer, raw)) { blink(); blinkTimer.seconds = blinkTimer.left = 2.6 + Math.random() * 3.6 }
     if (fires(wanderTimer, raw)) {
@@ -361,16 +392,15 @@ export function createOrb() {
     derive()
 
     for (const tw of tweens) advance(tw, raw)
-    if (!visible()) for (const tw of tweens) { tw.fresh = false; advance(tw, tw.dur) }
-    if (blinkFresh) blinkFresh = false
-    else if (blinkT >= 0) {
-      blinkT += raw
-      if (blinkT < 0.07) lid = blinkFrom + (0.08 - blinkFrom) * inQuad(blinkT / 0.07)
-      else if (blinkT < 0.18) lid = 0.08 + 0.92 * outQuad((blinkT - 0.07) / 0.11)
-      else { lid = 1; blinkT = -1 }
+    const bl = lidBlink
+    if (!held(bl) && bl.t >= 0) {
+      bl.t += raw
+      if (bl.t < 0.07) lid = bl.from + (0.08 - bl.from) * inQuad(bl.t / 0.07)
+      else if (bl.t < 0.18) lid = 0.08 + 0.92 * outQuad((bl.t - 0.07) / 0.11)
+      else { lid = 1; bl.t = -1 }
     }
-    if (!visible()) { lid = 1; blinkT = -1 }
-    for (const lp of [phase, pill, excited]) if (lp.fresh) lp.fresh = false; else if (lp.on) lp.t += raw
+    if (!visible()) snap()
+    for (const lp of [phase, pill, excited]) if (!held(lp) && lp.on) lp.t += raw
   }
 
   function motionT() {
@@ -432,7 +462,7 @@ export function createOrb() {
       u["moon" + i] = [Math.cos(a) * orbit, Math.sin(a) * orbit, out, home]
     }
     return {
-      visible: visible(), shown, mode, listening: shown && mode === "listening",
+      visible: visible(), wakeAt: !visible() ? -1 : shown ? hideAt : fadeEnd, shown, mode, listening: shown && mode === "listening",
       opacity: opacity.v, scale: scale.v,
       sx: m.sx * creatureScale.v * gx, sy: m.sy * creatureScale.v * gy, rot: m.rot,
       x: m.x + eyeX * 0.2, y: m.y + eyeY * 0.2,
@@ -441,5 +471,5 @@ export function createOrb() {
     }
   }
 
-  return { set, event, hide, mic, cursor, reduceMotion, colors, step, frame }
+  return { set, event, hide, mic, cursor, reduceMotion, colors, step, wake, frame }
 }

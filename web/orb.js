@@ -1,9 +1,8 @@
 // The orb on a canvas: plugin/orb.mjs's logic drawn with plugin/orb.glsl in
 // WebGL2, the same pair the desktop plugin runs. The imports resolve to
 // /plugin/orb.mjs and /plugin/orb.glsl whether web/ is served at / or /web/.
-import { createOrb } from "../plugin/orb.mjs"
+import { createOrb, stage, aa } from "../plugin/orb.mjs"
 
-const STAGE = 760
 const VERTEX = `#version 300 es
 in vec2 corner;
 uniform vec2 origin, edgeX, edgeY;
@@ -12,8 +11,10 @@ void main() {
   qt_TexCoord0 = corner;
   gl_Position = vec4(origin + corner.x * edgeX + corner.y * edgeY, 0.0, 1.0);
 }`
+// Fragment ints default to mediump in GLSL ES, which may be 16 bits; the hash needs 32.
 const HEADER = `#version 300 es
 precision highp float;
+precision highp int;
 in vec2 qt_TexCoord0;
 out vec4 fragColor;
 uniform float qt_Opacity;
@@ -27,26 +28,42 @@ function compile(gl, type, src) {
   return s
 }
 
+async function fetchShader() {
+  const res = await fetch(new URL("../plugin/orb.glsl", import.meta.url))
+  if (!res.ok) throw new Error("orb.glsl: HTTP " + res.status)
+  return res.text()
+}
+
 export async function createOrbView(canvas, opts = {}) {
-  const body = opts.shader || await (await fetch(new URL("../plugin/orb.glsl", import.meta.url))).text()
+  const body = opts.shader || await fetchShader()
   const gl = canvas.getContext("webgl2", { alpha: true, premultipliedAlpha: true, antialias: false, preserveDrawingBuffer: !!opts.preserve })
   if (!gl) throw new Error("WebGL2 is not available")
-  const prog = gl.createProgram()
-  gl.attachShader(prog, compile(gl, gl.VERTEX_SHADER, VERTEX))
-  gl.attachShader(prog, compile(gl, gl.FRAGMENT_SHADER, HEADER + body))
-  gl.linkProgram(prog)
-  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog))
-  gl.useProgram(prog)
-  gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer())
-  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, 0, 1, 0, 0, 1, 1, 1]), gl.STATIC_DRAW)
-  const at = gl.getAttribLocation(prog, "corner")
-  gl.enableVertexAttribArray(at)
-  gl.vertexAttribPointer(at, 2, gl.FLOAT, false, 0, 0)
-  const locs = {}
+  let prog = null, buf = null, locs = {}
+
+  function setup() {
+    const vs = compile(gl, gl.VERTEX_SHADER, VERTEX), fs = compile(gl, gl.FRAGMENT_SHADER, HEADER + body)
+    prog = gl.createProgram()
+    gl.attachShader(prog, vs)
+    gl.attachShader(prog, fs)
+    gl.linkProgram(prog)
+    gl.deleteShader(vs)
+    gl.deleteShader(fs)
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog))
+    gl.useProgram(prog)
+    buf = gl.createBuffer()
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf)
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, 0, 1, 0, 0, 1, 1, 1]), gl.STATIC_DRAW)
+    const at = gl.getAttribLocation(prog, "corner")
+    gl.enableVertexAttribArray(at)
+    gl.vertexAttribPointer(at, 2, gl.FLOAT, false, 0, 0)
+    locs = {}
+  }
+  setup()
   const loc = name => name in locs ? locs[name] : (locs[name] = gl.getUniformLocation(prog, name))
 
-  const core = createOrb()
-  let frame = core.frame(), raf = 0, last = 0
+  const now = opts.now || (() => performance.now() / 1000)
+  const core = createOrb({ now })
+  let frame = core.frame(), raf = 0, last = 0, running = false, lost = false, waker = 0, wakeAt = -1
 
   function uniform(name, v) {
     const l = loc(name)
@@ -57,8 +74,9 @@ export async function createOrbView(canvas, opts = {}) {
   }
 
   function render() {
+    const W = canvas.clientWidth, H = canvas.clientHeight
+    if (lost || !W || !H) return
     const dpr = opts.dpr || window.devicePixelRatio || 1
-    const W = canvas.clientWidth || canvas.width, H = canvas.clientHeight || canvas.height
     const pw = Math.round(W * dpr), ph = Math.round(H * dpr)
     if (canvas.width !== pw || canvas.height !== ph) { canvas.width = pw; canvas.height = ph }
     gl.viewport(0, 0, pw, ph)
@@ -66,8 +84,8 @@ export async function createOrbView(canvas, opts = {}) {
     gl.clear(gl.COLOR_BUFFER_BIT)
     if (!frame.visible) return
 
-    const k = opts.scale || W / STAGE, f = frame
-    const [ox, oy] = opts.origin ? opts.origin(W, H, k) : [W / 2, H - 260 * k], cx = W / 2, cy = H / 2
+    const k = opts.scale || W / stage.size, f = frame
+    const [ox, oy] = opts.origin ? opts.origin(W, H, k) : [W / 2, H - stage.orbY * k], cx = W / 2, cy = H / 2
     const r = f.rot * Math.PI / 180, cos = Math.cos(r), sin = Math.sin(r)
     const place = (u, v) => {
       const bx = (u - 0.5) * f.size * f.sx, by = (v - 0.5) * f.size * f.sy
@@ -79,35 +97,75 @@ export async function createOrbView(canvas, opts = {}) {
     uniform("edgeX", [ex[0] - o[0], ex[1] - o[1]])
     uniform("edgeY", [ey[0] - o[0], ey[1] - o[1]])
     uniform("qt_Opacity", f.opacity)
-    uniform("aa", 1 / (k * dpr))
+    uniform("aa", aa(k, dpr))
     for (const name in f.uniforms) uniform(name, f.uniforms[name])
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
   }
 
-  function tick(now) {
+  function arm() {
+    if (frame.wakeAt === wakeAt) return
+    clearTimeout(waker)
+    wakeAt = frame.wakeAt
+    if (wakeAt >= 0) waker = setTimeout(() => { wakeAt = -1; frame = core.wake(); settle() }, Math.max(0, (wakeAt - now()) * 1000))
+  }
+
+  function settle() {
+    arm()
+    if (frame.visible) resume()
+    else if (raf) { cancelAnimationFrame(raf); raf = 0; render() }
+  }
+
+  function resume() {
+    if (running && !raf && !lost && frame.visible) { last = 0; raf = requestAnimationFrame(tick) }
+  }
+
+  function tick(t) {
     raf = requestAnimationFrame(tick)
-    const dt = last ? (now - last) / 1000 : 0
-    last = now
+    const dt = last ? (t - last) / 1000 : 0
+    last = t
     if (opts.onBeforeStep) opts.onBeforeStep(frame)
     frame = core.step(dt)
     render()
     if (opts.onFrame) opts.onFrame(frame)
+    arm()
+    if (!frame.visible) { cancelAnimationFrame(raf); raf = 0 }
   }
 
-  const fresh = () => { frame = core.frame() }
+  function onLost(e) {
+    e.preventDefault()
+    lost = true
+    cancelAnimationFrame(raf)
+    raf = 0
+  }
+  function onRestored() {
+    lost = false
+    setup()
+    resume()
+    if (!raf) render()
+  }
+  canvas.addEventListener("webglcontextlost", onLost)
+  canvas.addEventListener("webglcontextrestored", onRestored)
+
+  const fresh = () => { frame = core.frame(); settle() }
   return {
     set(json) { core.set(json); fresh() },
-    event(line) { core.event(line); fresh() },
+    event(line) { core.event(line) },
     mic(level) { core.mic(level) },
-    cursor(x, y) { core.cursor(x, y); fresh() },
+    cursor(x, y) { core.cursor(x, y) },
     reduceMotion(on) { core.reduceMotion(on); fresh() },
     colors(c) { core.colors(c); fresh() },
     hide() { core.hide(); fresh() },
-    start() { if (!raf) { last = 0; raf = requestAnimationFrame(tick) } },
-    stop() { cancelAnimationFrame(raf); raf = 0 },
-    step(dt) { frame = core.step(dt); return frame },
+    start() { running = true; resume() },
+    stop() { running = false; cancelAnimationFrame(raf); raf = 0 },
+    step(dt) { frame = core.step(dt); arm(); return frame },
     render,
     get frame() { return frame },
-    destroy() { this.stop(); gl.getExtension("WEBGL_lose_context")?.loseContext() }
+    destroy() {
+      this.stop()
+      clearTimeout(waker)
+      canvas.removeEventListener("webglcontextlost", onLost)
+      canvas.removeEventListener("webglcontextrestored", onRestored)
+      if (!gl.isContextLost()) { gl.deleteBuffer(buf); gl.deleteProgram(prog) }
+    }
   }
 }
