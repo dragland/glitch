@@ -50,7 +50,6 @@ step() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 ok() { printf '    %s\n' "$*"; }
 die() { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
-# Point $2 at $1, replacing an older link but never a real file.
 link() {
   local target=$1 path=$2
   mkdir -p "$(dirname "$path")"
@@ -61,7 +60,6 @@ link() {
   ok "${path/#$HOME/~} -> ${target/#$HOME/~}"
 }
 
-# Download $1 to $2 unless it's already there, and check its sha256 ($3).
 fetch() {
   local url=$1 out=$2 sha=$3
   if [[ ! -s $out ]]; then
@@ -138,8 +136,6 @@ if [[ ! -f $CONFIG/glitch/glitch.conf ]]; then
 fi
 
 step "Orb shader"
-# The compiled shader is committed (machines without qt6-shadertools use it);
-# rebuild only when the source is newer, so installs don't dirty the checkout.
 qsb_out="$REPO/plugin/glitch.frag.qsb"
 if [[ ! -s $qsb_out || $REPO/plugin/glitch.frag -nt $qsb_out ]]; then
   if [[ -x /usr/lib/qt6/bin/qsb ]]; then
@@ -243,7 +239,6 @@ step "Shell plugin"
 omarchy-shell -q shell rescanPlugins >/dev/null 2>&1 || true
 sleep 1
 omarchy plugin enable "$PLUGIN_ID" >/dev/null
-# The orb is a keepLoaded panel, which only picks up new code on a shell restart.
 omarchy restart shell >/dev/null 2>&1
 for _ in $(seq 1 20); do omarchy-shell -q glitch ping >/dev/null 2>&1 && break; sleep 0.5; done
 omarchy-shell -q glitch ping >/dev/null 2>&1 && ok "orb loaded" || die "the orb plugin didn't load (quickshell log -p \$OMARCHY_PATH/shell)"

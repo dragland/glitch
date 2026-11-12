@@ -38,8 +38,6 @@ Item {
   property string mood: "curious"
   property real energy: 0.5
 
-  // Activity energy (the original's typing energy): bumps on events, decays
-  // 0.05 every 100 ms.
   property real activity: 0
 
   readonly property var palettes: ({
@@ -54,7 +52,6 @@ Item {
   readonly property var patterns: ({ rings: 0, checker: 1, waves: 2, dots: 3, stripes: 4, noise: 5, fine: 6 })
   readonly property var pal: palettes[paletteName] || palettes.electric
 
-  // CSS `transition-all duration-700 ease-out` on the creature.
   property color color1: pal.color1
   property color color2: pal.color2
   property color bgColor: pal.bg
@@ -66,10 +63,8 @@ Item {
   property real patMix: 0
   NumberAnimation { id: patFade; target: root; property: "patMix"; from: 1; to: 0; duration: 400; easing.type: Easing.InOutQuad }
 
-  // One CSS px in logical px: the original's 200 px idle creature is ~128 here.
   readonly property real k: Style.space(128) / 200
 
-  // width: 200 + (activity + energy) * 100 px; glow 40 + activity * 100 px.
   property real baseDiameter: 200 + (activity + energy) * 100
   property real baseGlow: 40 + activity * 100
   property real creatureScale: 1 + activity * 0.1
@@ -426,8 +421,6 @@ Item {
     }
   }
 
-  // Like the original's prefers-reduced-motion rule: with Hyprland animations
-  // off, the creature holds still (colours and size still change).
   property bool reduceMotion: false
   Process {
     running: true
@@ -446,11 +439,9 @@ Item {
     duration: root.motionDurations[root.motion] || 4000
     running: panel.visible
   }
-  // Blend into a new motion instead of the original's hard class swap.
   property real amp: 1
   NumberAnimation { id: motionAmp; target: root; property: "amp"; from: 0; to: 1; duration: 450; easing.type: Easing.OutCubic }
 
-  // ease-in-out between keyframes at 0%, 50%, 100%.
   function swing(t) { return 0.5 - 0.5 * Math.cos(2 * Math.PI * t) }
   readonly property var motionT: {
     var t = phase, s = swing(t), a = amp
@@ -475,14 +466,12 @@ Item {
     return { sx: 1 + 0.008 * v + 0.025 * g + 0.02 * e, sy: 1 + 0.022 * v - 0.04 * g - 0.03 * e }
   }
 
-  // Surprised: the pill's own animate-bounce (1 s), independent of the body.
   property real pillPhase: 0
   NumberAnimation on pillPhase {
     from: 0; to: 1; loops: Animation.Infinite; duration: 1000
     running: root.mood === "surprised" && panel.visible && !root.reduceMotion
   }
 
-  // Excited: animate-ping ring, 1 s loop (scale to 2x and fade by 75%).
   property real excitedRing: 0
   SequentialAnimation on excitedRing {
     running: root.mood === "excited" && panel.visible && !root.reduceMotion
@@ -501,8 +490,7 @@ Item {
 
   PanelWindow {
     id: panel
-    // Follow the focused monitor so the orb appears where you're looking
-    // (GLITCH_SCREEN pins it to one output, for testing).
+    // GLITCH_SCREEN pins it to one output, for testing.
     screen: {
       var name = Quickshell.env("GLITCH_SCREEN") || (Hyprland.focusedMonitor ? Hyprland.focusedMonitor.name : "")
       for (var i = 0; i < Quickshell.screens.length; i++)
@@ -528,10 +516,8 @@ Item {
       Behavior on opacity { NumberAnimation { duration: 400; easing.type: Easing.OutCubic } }
       Behavior on scale { NumberAnimation { duration: 500; easing.type: Easing.OutBack } }
 
-      // Motion + the creature's own translate (eye * 0.2) and scale.
       Item {
         id: creature
-        // Centre the creature low in the window, leaving headroom for growth and bounce.
         width: parent.width
         height: parent.width
         y: parent.height - 260 * root.k - height / 2
@@ -634,7 +620,6 @@ Item {
           }
         }
 
-        // Surprised: a little white pill bouncing above the creature.
         Rectangle {
           visible: root.mood === "surprised"
           width: 16 * root.k

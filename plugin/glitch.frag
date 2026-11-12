@@ -135,7 +135,6 @@ void main() {
     float room = 1.0 - up(d, itemPx * 0.5 - 70.0, itemPx * 0.5 - 2.0);
     vec4 col = pm(secondary, glowAlpha * room * exp(-0.5 * (outside * outside) / (sigma * sigma)));
 
-    // Excited: animate-ping ring (scale to 2x and fade).
     if (ring > 0.0) {
         float rr = R * (1.0 + ring) - 2.0 * (1.0 + ring);
         float w = 4.0 * (1.0 + ring);

@@ -44,7 +44,7 @@ def lin_ramp(v0, v1, n):
 
 
 def osc(kind, freq):
-    out, phase = [], 0.0  # phase in cycles
+    out, phase = [], 0.0
     for f in freq:
         frac = phase % 1.0
         if kind == "square":
@@ -87,8 +87,8 @@ def syllable(voice, base, energy, mood, exact=False):
         p *= 0.6
     x = 0.3 + energy * 0.3
     kind = "sine"
-    f_target = None   # exponential frequency ramp target
-    f_linear = None   # linear frequency ramp target
+    f_target = None
+    f_linear = None
     gain_peak, gain_attack = x, 0.02
     filt = None
 
@@ -127,7 +127,7 @@ def syllable(voice, base, energy, mood, exact=False):
     n_a = int(RATE * gain_attack)
     gain = (lin_ramp(0, gain_peak, n_a) + exp_ramp(gain_peak, 0.01, max(0, n_p - n_a))
             + [0.01] * max(0, total - max(n_p, n_a)))[:total]
-    n_stop = int(RATE * 0.005)  # osc.stop() click guard
+    n_stop = int(RATE * 0.005)
     for i in range(n_stop):
         gain[total - n_stop + i] *= 1 - i / n_stop
 
