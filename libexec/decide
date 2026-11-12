@@ -222,6 +222,10 @@ def main():
         return 1
     context = describe(ev)
     working = ev.get("phase") == "working"
+    # "All clear" is one designed look (mint, fine grain), not a mix: when the
+    # agent says clear, the table's reaction stands and nothing is asked here.
+    if not working and ev.get("mood") == "clear" and not ev.get("failed"):
+        return 0
     deadline = time.monotonic() + float(ev.get("deadline", 3))
     questions = {}
     for name in (WORKING_ORDER if working else ORDER):
