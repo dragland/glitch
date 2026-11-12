@@ -1,50 +1,54 @@
-#version 440
 // The glitch creature as one fragment shader, in CSS px. Patterns, palettes and
 // glows are Beep Jev's (beepjev.replit.app). The eye is the pattern: texture
 // space is centred on the gaze point and magnified there. The globe edge
 // foreshortens and thins the pattern toward a soft rim, so drift reads as
-// turning. The live-signal uniforms are listed below.
+// turning. The rim's ticks, the moons and the surprised pill are drawn here too.
+// Shared by both orbs: plugin/build-shader moves the uniform lines into Qt's
+// uniform block for glitch.frag.qsb, and web/orb.js prepends a WebGL2 header.
+// orb.mjs supplies every uniform but aa.
 
-layout(location = 0) in vec2 qt_TexCoord0;
-layout(location = 0) out vec4 fragColor;
-
-layout(std140, binding = 0) uniform buf {
-    mat4 qt_Matrix;
-    float qt_Opacity;
-    vec4 primary;      // palette color1
-    vec4 secondary;    // palette color2
-    vec4 bg;           // palette bg
-    float itemPx;      // item side in CSS px (creature + glow padding)
-    float diameter;    // creature diameter in CSS px
-    float glowBlur;    // outer glow blur radius, CSS px
-    float glowAlpha;   // outer glow strength (0.25 at rest)
-    float pattern;     // 0 rings, 1 checker, 2 waves, 3 dots, 4 stripes, 5 noise, 6 fine
-    float pattern2;    // the pattern being blended from
-    float patMix;      // 0 = pattern only, 1 = pattern2 only
-    vec2 eye;          // gaze point from centre, CSS px
-    float lens;        // magnification at the gaze point (0 = blinked shut)
-    float lensSize;    // radius of the magnified patch, CSS px
-    float eyeGlow;     // glow at the gaze point
-    float aa;          // one device pixel in CSS px
-    vec2 scroll;       // pattern drift (token speed), CSS px
-    float ringPhase;   // rings travel: + inward, - outward
-    float swellPhase;  // waves: undulation phase
-    float swellDrift;  // waves: roll, CSS px
-    float reveal;      // checker: share of cells filled in
-    float flash;       // an edit just landed: new cells and the rim flash
-    float wobble;      // rim give with the voice (about 0.01 at full level)
-    float wobblePhase;
-    float radar;       // look: sweep strength
-    float radarAngle;
-    float comet;       // a tool is out: comet strength
-    float cometAngle;
-    float tide;        // context fill 0..1
-    float tideShow;    // 0..1: shown while working
-    float tidePhase;
-    vec4 pings;        // up to four pings, progress 0..1 (0 = off)
-    float pingDir;     // 1 outward (it speaks), -1 inward (you speak)
-    float ring;        // excited: ping ring progress 0..1 (0 = off)
-};
+uniform vec4 primary;      // palette color1
+uniform vec4 secondary;    // palette color2
+uniform vec4 bg;           // palette bg
+uniform float itemPx;      // item side in CSS px (creature + glow padding)
+uniform float diameter;    // creature diameter in CSS px
+uniform float glowBlur;    // outer glow blur radius, CSS px
+uniform float glowAlpha;   // outer glow strength (0.25 at rest)
+uniform float pattern;     // 0 rings, 1 checker, 2 waves, 3 dots, 4 stripes, 5 noise, 6 fine
+uniform float pattern2;    // the pattern being blended from
+uniform float patMix;      // 0 = pattern only, 1 = pattern2 only
+uniform vec2 eye;          // gaze point from centre, CSS px
+uniform float lens;        // magnification at the gaze point (0 = blinked shut)
+uniform float lensSize;    // radius of the magnified patch, CSS px
+uniform float eyeGlow;     // glow at the gaze point
+uniform float aa;          // one device pixel in CSS px
+uniform vec2 scroll;       // pattern drift (token speed), CSS px
+uniform float ringPhase;   // rings travel: + inward, - outward
+uniform float swellPhase;  // waves: undulation phase
+uniform float swellDrift;  // waves: roll, CSS px
+uniform float reveal;      // checker: share of cells filled in
+uniform float flash;       // an edit just landed: new cells and the rim flash
+uniform float wobble;      // rim give with the voice (about 0.01 at full level)
+uniform float wobblePhase;
+uniform float radar;       // look: sweep strength
+uniform float radarAngle;
+uniform float comet;       // a tool is out: comet strength
+uniform float cometAngle;
+uniform float tide;        // context fill 0..1
+uniform float workShow;    // 0..1: the tide and the ticks, shown while working
+uniform float tidePhase;
+uniform vec4 pings;        // up to four pings, progress 0..1 (0 = off)
+uniform float pingDir;     // 1 outward (it speaks), -1 inward (you speak)
+uniform float ring;        // excited: ping ring progress 0..1 (0 = off)
+uniform float ticks;       // tool calls this turn, one tick each on the rim (up to 39)
+uniform vec2 tickFresh;    // the newest tick's index and its glow 0..1
+uniform vec4 moon0;        // a subagent: position from centre, out 0..1, home 0..1
+uniform vec4 moon1;
+uniform vec4 moon2;
+uniform vec4 moon3;
+uniform vec4 moon4;
+uniform vec4 moon5;
+uniform vec2 pill;         // surprised: shown 0/1, lift 0..1
 
 const float GLOBE = 0.75;
 const float LIMB = 0.22;
@@ -67,6 +71,14 @@ float turbulence(vec2 p) {
     float v = 0.0, a = 0.5, f = 0.65;
     for (int o = 0; o < 3; o++) { v += a * vnoise(p * f); f *= 2.0; a *= 0.5; }
     return v / 0.875;
+}
+
+float disc(vec2 p, float r) { return clamp((r - length(p)) / aa + 0.5, 0.0, 1.0); }
+
+vec4 moon(vec4 m, vec2 c, vec4 pale) {
+    vec2 p = c - m.xy;
+    vec4 halo = pm(secondary, 0.16 * m.z * (1.0 - m.w) * disc(p, 13.0));
+    return over(pm(pale, 0.95 * (1.0 - m.w) * disc(p, 4.6 * (0.4 + 0.6 * m.z) * (1.0 - 0.4 * m.w))), halo);
 }
 
 vec4 dots(vec2 p, float period, float r) {
@@ -168,11 +180,11 @@ void main() {
 
         vec4 body = over(A, pm(bg, 0.9));
 
-        if (tide > 0.0 && tideShow > 0.0) {
+        if (tide > 0.0 && workShow > 0.0) {
             float level = R - 2.0 * R * tide + 3.0 * sin(t.x * 0.07 + tidePhase * 2.2) + 1.5 * sin(t.x * 0.16 - tidePhase * 3.1);
-            body = over(pm(primary, 0.10 * tideShow * clamp((t.y - level) / (2.0 * aa) + 0.5, 0.0, 1.0)), body);
+            body = over(pm(primary, 0.10 * workShow * clamp((t.y - level) / (2.0 * aa) + 0.5, 0.0, 1.0)), body);
             float ld = (t.y - level) / 1.3;
-            body = over(vec4(0.275 * tideShow * exp(-0.5 * ld * ld)), body);
+            body = over(vec4(0.275 * workShow * exp(-0.5 * ld * ld)), body);
         }
 
         float edge = R - dn;
@@ -193,6 +205,30 @@ void main() {
             body = mix(body, vec4(primary.rgb * 0.4 + 0.6, 1.0), m);
         }
         col = mix(col, body, inside);
+    }
+
+    vec4 pale = vec4(mix(secondary.rgb, vec3(1.0), 0.55), 1.0);
+    float orbit = R + 10.0;
+    if (ticks > 0.0 && workShow > 0.0 && abs(d - orbit) < 8.0) {
+        float near = floor(mod(ang + 0.25 * TAU, TAU) / 0.161 + 0.5);
+        for (int j = -1; j <= 1; j++) {
+            float i = mod(near + float(j), 39.0);
+            if (i >= ticks) continue;
+            float a = -0.25 * TAU + i * 0.161;
+            float fresh = i == tickFresh.x ? tickFresh.y : 0.0;
+            float cover = disc(c - orbit * vec2(cos(a), sin(a)), 3.3 + 1.9 * fresh);
+            col = over(pm(pale, workShow * (0.55 + 0.45 * fresh) * cover), col);
+        }
+    }
+    col = over(moon(moon0, c, pale), col);
+    col = over(moon(moon1, c, pale), col);
+    col = over(moon(moon2, c, pale), col);
+    col = over(moon(moon3, c, pale), col);
+    col = over(moon(moon4, c, pale), col);
+    col = over(moon(moon5, c, pale), col);
+    if (pill.x > 0.0) {
+        float mid = -R - 16.0 - 40.0 * pill.y;
+        col = over(vec4(0.5 * disc(vec2(c.x, max(abs(c.y - mid) - 8.0, 0.0)), 8.0)), col);
     }
     fragColor = col * qt_Opacity;
 }
