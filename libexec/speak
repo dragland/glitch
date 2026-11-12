@@ -41,7 +41,7 @@ def main():
     with wave.open(tmp, "wb") as w:
         voice.synthesize_wav(text, w)
     env = os.path.splitext(out)[0] + ".env"
-    try:  # speech must not depend on the envelope
+    try:
         with open(env + ".tmp", "w") as f:
             f.write(" ".join(map(str, [ENV_HZ] + envelope(tmp))))
         os.replace(env + ".tmp", env)

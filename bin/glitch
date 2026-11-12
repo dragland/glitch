@@ -59,9 +59,8 @@ set_state() {
   omarchy-shell -q glitch set "$json" >/dev/null 2>&1 || true
 }
 
-# A live signal for the orb (listed at the top of plugin/Glitch.qml): one line
-# appended to orb.events, which the orb tails. It is a file because IPC costs a
-# process per call, and this runs for every streamed word.
+# A live signal for the orb (listed at the top of plugin/Glitch.qml). A file the
+# orb tails, because IPC costs a process per call.
 ev() { printf '%s\n' "$*" >>"$RT/orb.events"; }
 
 # The current session id, if it's fresh and belongs to agent $1 (sid.agent):
@@ -100,9 +99,7 @@ cue() {
 
 # --- speech -------------------------------------------------------------------
 # A turn warms Piper up front (libexec/speak loads the voice while the agent
-# works), then says one line through a FIFO when the reply arrives. Each
-# speaker has its own files ($1: say for the turn's reply, ask for an approval,
-# aside for `glitch say`), so one can't take another's warm voice.
+# works), then says one line through a FIFO when the reply arrives.
 
 speech_warm() {
   SPEAK_SLOT="$RT/${1:-say}"
@@ -123,8 +120,7 @@ speech_render() {
   SPEAK_PID=""
 }
 
-# Play a rendered file; `glitch hush` (or any key press) stops it. Fails if it
-# was cut short.
+# Play a rendered file; `glitch hush` (or any key press) stops it.
 play() {
   local rc
   [[ -s $1 ]] || return 0
@@ -427,7 +423,7 @@ cmd_start() {
   voxtype record start --file="$RT/utterance.txt" --no-osd 2>>"$RT/glitch.log"
   REACTION=$(reaction listening)
   set_state listening
-  cue --notes 440,587 # the mic opens: two chirps up
+  cue --notes 440,587
   # Watchdog: a forgotten recording sends itself just before voxtype's own cap.
   setsid bash -c "sleep $((RECORD_LIMIT - 10)); [[ \$(cat '$RT/recording' 2>/dev/null) == $stamp ]] && exec '$0' stop" \
     </dev/null >/dev/null 2>&1 8>&- 9>&- &
@@ -447,7 +443,7 @@ cmd_stop() {
   fi
   REACTION=$(reaction listening)
   set_state transcribing
-  cue --notes 587,440 # the mic closes: two chirps down
+  cue --notes 587,440
   out=$(voxtype record stop --wait --json --wait-file "$RT/utterance.txt" --timeout 30 2>>"$RT/glitch.log")
   rc=$?
   text=$(tr '\n' ' ' 2>/dev/null <"$RT/utterance.txt" | sed 's/^ *//;s/ *$//')
@@ -510,9 +506,8 @@ cmd_turn() {
   rm -f "$RT/live.json" "$RT/live.in"
   (($(stat -c %s "$RT/orb.events" 2>/dev/null || echo 0) > 200000)) && : >"$RT/orb.events"
   window=$(cat "$DATA/ctx.window" 2>/dev/null)
-  [[ $window =~ ^[1-9][0-9]{0,11}$ ]] || window="" # not known yet: no tide this turn, not a guessed one
+  [[ $window =~ ^[1-9][0-9]{0,11}$ ]] || window=""
   ev turn
-  # A new session starts empty, and only Claude reports its context.
   [[ -z $SID || $agent != claude ]] && ev "ctx 0"
   speech_warm
   REACTION=$(reaction thinking)
@@ -547,8 +542,7 @@ cmd_turn() {
     # Digit counts are bounded because bash arithmetic wraps past 2^63.
     ctx) [[ -n $window && $rest =~ ^[0-9]{1,12}$ ]] && ev "ctx $(printf '0.%03d' $((rest * 1000 / window > 999 ? 999 : rest * 1000 / window)))" ;;
     window)
-      # Known only when a turn ends, so the tide uses the last turn's. Kept
-      # across logins, or the first turn of each would guess.
+      # Claude reports it only when a turn ends, so the tide uses the last turn's.
       [[ $rest =~ ^[1-9][0-9]{0,11}$ ]] && window=$rest && mkdir -p "$DATA" && write_atomic "$DATA/ctx.window" "$rest"
       ;;
     words)
@@ -569,7 +563,7 @@ cmd_turn() {
     esac
   done < <(printf '%s' "$text" | run_agent "$agent" "$SID")
 
-  ev rest # the work is over, however it ended: nothing is out any more
+  ev rest
   rm -f "$RT/turn.pid"
   touch "$RT/sid" 2>/dev/null # the resume window counts from the end of the turn
   if [[ -e $RT/cancel.$$ ]]; then
@@ -592,7 +586,6 @@ cmd_turn() {
   body=$(markup_escape "${result:0:900}")
   stop_live
 
-  # Speak first, with the agent's own MOOD.
   [[ -n $failed ]] && say="Sorry, something went wrong."
   [[ -x $PY ]] && jq -cn --arg user "$text" --arg say "$say" --arg reply "${result:0:900}" --arg mood "$mood" \
     --argjson failed "$([[ -n $failed ]] && echo true || echo false)" --argjson history "$(recent_history "$SID")" \
@@ -618,8 +611,6 @@ cmd_turn() {
 
   notify "$summary" "$body" --exec "$0" open &
   set_state "$state" "$say"
-  # The decision model's final reaction goes on the orb as soon as it's ready,
-  # usually mid-sentence. Waited on below, so it can't land after "done".
   (
     timeout 5 tail -s 0.05 --pid="$decide_pid" -f /dev/null 2>/dev/null
     fin=$(cat "$RT/final.out" 2>/dev/null)
@@ -630,16 +621,14 @@ cmd_turn() {
   local look_pid=$!
   # Don't talk over a recording that started meanwhile.
   if [[ ! -e $RT/recording ]]; then
-    # The beep phrase follows the sentence's melody: up for a question, down
-    # for bad news, an arch otherwise.
     contour=arch
     [[ $say == *\? ]] && contour=rise
     [[ -n $failed || $mood == sorry || $mood == concerned ]] && contour=fall
     cue --contour "$contour"
     sleep 0.4 # let the beeps lead into the voice
-    [[ -s $RT/say.env ]] && ev "say $(<"$RT/say.env")" # the orb moves with its own voice
+    [[ -s $RT/say.env ]] && ev "say $(<"$RT/say.env")"
     if play "$RT/say.wav" && [[ $state == speaking && -s $RT/say.wav ]]; then
-      REACTION='{"voice":"bubble","energy":0.4,"mood":"calm"}' cue --notes 360 # the closing bubble
+      REACTION='{"voice":"bubble","energy":0.4,"mood":"calm"}' cue --notes 360
     fi
   fi
 
@@ -721,7 +710,7 @@ cmd_cancel() {
     for _ in 1 2 3 4 5 6; do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
     pkill -TERM -s "$pid" 2>/dev/null
     rm -f "$RT/cancel.$pid"
-    ev rest # in case the turn was killed before it could say so
+    ev rest
   fi
   REACTION=$(reaction mood.unsure) set_state idle "cancelled"
 }
