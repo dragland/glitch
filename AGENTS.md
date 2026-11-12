@@ -11,7 +11,7 @@
 - **Keep the vocabularies in sync:** the MOOD list in voice-prompt.md matches the `.mood` keys in reactions.json. Palette, pattern and motion names match Glitch.qml (`palettes`, `patterns`) and the pattern indices in glitch.frag. decide's mood options are the orb's (they drive the excited, surprised and focused flourishes), not the agent's.
 - **Rings mean listening:** nothing shown while working (decide's choices or the `tool.*` reactions) uses rings.
 - **Remote control** (`systemd/glitch-remote*`, `glitch _reap`): free sessions by restarting the whole server, never by killing one session's process (the app keeps showing it connected while its turns hang), and never add `--no-create-session-in-dir` (stopping would archive every session).
-- **Never** `bypassPermissions` or Codex's `--dangerously-bypass-*` for glitch's turns, even for an agent `omarchy-agent` runs that way (grok): otherwise glitch runs agents with omarchy-agent's modes (remote control's mode is the operator's). Tap-toggle, not hold, because releases of modifier-chord keys get lost.
+- **Never** `bypassPermissions` or Codex's `--dangerously-bypass-*` for glitch's turns, even for an agent `omarchy-agent` runs that way (grok): otherwise glitch runs agents with omarchy-agent's modes (glitch-remote's `bypassPermissions` is the user's choice; leave it). Tap-toggle, not hold, because releases of modifier-chord keys get lost.
 
 Debug: `tail -f $XDG_RUNTIME_DIR/glitch/glitch.log`, `omarchy-shell -q glitch set '{"state":"thinking","reaction":{…}}'`, `libexec/preview`, `journalctl --user -u glitch-mind -u glitch-remote`, `quickshell log -p $OMARCHY_PATH/shell`.
 

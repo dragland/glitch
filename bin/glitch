@@ -663,9 +663,8 @@ cmd_cancel() {
 # with MCP servers, and one of 32 slots) until it restarts; only claude.ai
 # project threads park themselves. Restart it once every session has been quiet
 # REMOTE_IDLE_MIN minutes (glitch-remote-reap.timer): the next message respawns
-# a session with its context. Never kill one session's process: the app keeps
-# showing it connected while its turns hang. A turn waiting with no process (an
-# unanswered question, a /loop) is lost.
+# a session with its context. A turn waiting with no process (an unanswered
+# question, a /loop) is lost.
 cmd_reap() {
   local main dir recent p top up grace procs
   [[ $REMOTE_IDLE_MIN =~ ^[1-9][0-9]*$ ]] || { echo "REMOTE_IDLE_MIN must be a positive number" >&2; return 1; }
