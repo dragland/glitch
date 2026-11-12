@@ -270,7 +270,7 @@ def main():
     energy = round((expect("energy", 3) - 1) / 4, 2)  # 1..5 -> 0..1
     last = ((ev.get("history") or [{}])[-1].get("reaction") or {})
     # The mood carries over as the palette, unless the last look was a designed
-    # one (clear's mint), which is never worn with another pattern.
+    # one (clear's mint), which is never shown with another pattern.
     carried = last.get("palette")
     if carried not in [o for o, _ in QUESTIONS["palette"][1]]:
         carried = "ocean"
