@@ -6,6 +6,7 @@
     cue --beeps N '<json>'  force the number of syllables (1 = a single tick)
     cue --notes 440,587 '<json>'       play exactly these pitches, in the reaction's voice
     cue --contour arch|rise|fall '<json>'  a phrase whose pitch follows a melody, not chance
+    cue --out FILE ...      write the phrase to FILE (a wav, replaced atomically) instead of playing it
 
 Voices: chirp, blip, bubble, robot, chatter, whisper.
 """
@@ -24,7 +25,8 @@ from array import array
 # in milliseconds, while importing numpy alone costs ~100 ms per beep.
 
 RATE = 48000
-MASTER = 0.4 * float(os.environ.get("GLITCH_BEEP_VOLUME", "1.0"))
+MASTER = 0.4
+VOLUME = float(os.environ.get("GLITCH_BEEP_VOLUME", "2.0"))
 
 
 def exp_ramp(v0, v1, n):
@@ -185,7 +187,7 @@ def limiter(x):
 
 def main():
     args = sys.argv[1:]
-    beeps = notes = contour = None
+    beeps = notes = contour = out = None
     while args[:1] and args[0].startswith("--") and len(args) > 1:
         if args[0] == "--beeps":
             beeps = int(args[1])
@@ -193,6 +195,8 @@ def main():
             notes = [float(n) for n in args[1].split(",")]
         elif args[0] == "--contour" and args[1] in CONTOURS:
             contour = args[1]
+        elif args[0] == "--out":
+            out = args[1]
         args = args[2:]
     if not args:
         print(__doc__)
@@ -202,15 +206,23 @@ def main():
     except json.JSONDecodeError:
         return 1
     audio = limiter([v * MASTER for v in phrase(r, beeps, notes, contour)])
-    pcm = array("h", (int(max(-1.0, min(1.0, v)) * 32767) for v in audio))
+    pcm = array("h", (int(max(-1.0, min(1.0, v * VOLUME)) * 32767) for v in audio))
+    if out:
+        write_wav(out + ".tmp", pcm)
+        os.replace(out + ".tmp", out)
+        return 0
     with tempfile.NamedTemporaryFile(suffix=".wav", dir=os.environ.get("XDG_RUNTIME_DIR")) as f:
-        with wave.open(f.name, "wb") as w:
-            w.setnchannels(1)
-            w.setsampwidth(2)
-            w.setframerate(RATE)
-            w.writeframes(pcm.tobytes())
+        write_wav(f.name, pcm)
         subprocess.run(["pw-play", f.name], check=False)
     return 0
+
+
+def write_wav(path, pcm):
+    with wave.open(path, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(RATE)
+        w.writeframes(pcm.tobytes())
 
 
 if __name__ == "__main__":
