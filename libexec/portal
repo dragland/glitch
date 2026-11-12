@@ -19,9 +19,10 @@ Phone turns write their channel to RT/phone (bin/glitch, GLITCH_PORTAL=phone):
   clips/<id>     the clips; clips/<id>.played (played|hushed) is written here and
                  ends bin/glitch's wait for that clip
   approve.<id>   the answer (allow|deny), written here
-  online         exists while a page holds /api/events
+  online         the server's pid, while a page holds /api/events
   pair           {hash: sha256 of the code, expires, tries}, made by `glitch pair`
-RT/turn.portal   "<desk|phone> <pid>" while a turn runs
+RT/turn.portal   "<desk|phone> <pid>" while a turn runs; its changes reach the page
+                 as `turn` {turn: desk|phone|null}, which no file holds
 DATA/portal/devices holds one "<sha256 of device key>\t<epoch>\t<user agent>" line per phone.
 
 Clips: kind is cue, say, ask or aside; ms its length; env the orb's "say" payload
@@ -56,7 +57,8 @@ from urllib.parse import parse_qs, urlsplit
 
 COOKIE = "glitch_device"
 COOKIE_AGE = 34560000  # Chrome caps a cookie's lifetime at 400 days
-PUBLIC = {("GET", "/pair"), ("POST", "/api/pair")}
+PUBLIC = {("GET", "/pair"), ("POST", "/api/pair"),
+          ("GET", "/manifest.webmanifest"), ("GET", "/icon-192.png"), ("GET", "/icon-512.png")}
 AUDIO = {"audio/webm": "matroska", "video/webm": "matroska", "audio/ogg": "ogg", "audio/mp4": "mov",
          "audio/wav": "wav", "audio/x-wav": "wav", "audio/wave": "wav"}
 CLIP = re.compile(r"[0-9]+-(cue|say|ask|aside)\.wav")
@@ -65,16 +67,27 @@ PLUGIN_FILES = {"orb.mjs", "orb.glsl"}
 SPEECH = {"say", "ask", "aside"}
 MAX_UPLOAD = 50 << 20
 MAX_CONNECTIONS = 32
-HEAD_SECONDS = 10
+MAX_UNPAIRED_PER_HOST = 8
+UNPAIRED_SECONDS = 10
+PING_SECONDS = 5
+DEAD_PEER_MS = 20000
 PAIR_TRIES = 5
 TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript", ".mjs": "text/javascript",
          ".css": "text/css", ".json": "application/json", ".svg": "image/svg+xml", ".png": "image/png",
          ".wav": "audio/wav", ".glsl": "text/plain; charset=utf-8", ".webmanifest": "application/manifest+json",
          ".woff2": "font/woff2", ".ico": "image/x-icon", ".txt": "text/plain; charset=utf-8"}
 
-PAIR_PAGE = b"""<!doctype html><meta name=viewport content="width=device-width"><title>glitch</title>
-<form id=f><input id=c inputmode=numeric autocomplete=one-time-code maxlength=6 placeholder="code" autofocus>
-<button>Pair</button></form><p id=m></p><script>
+PAIR_PAGE = b"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width, initial-scale=1">
+<meta name=theme-color content="#0a0b0e"><meta name=color-scheme content=dark><title>glitch</title>
+<style>html,body{margin:0;height:100%;background:#0a0b0e;color:#6b7079;font:15px/1.4 system-ui,sans-serif}
+body{display:grid;place-items:center}form{display:grid;gap:22px;justify-items:center;text-align:center;padding:24px}
+p{margin:0;max-width:17em;min-height:1.4em}
+input{width:6.2em;font:30px ui-monospace,monospace;letter-spacing:.2em;text-align:center;color:#e6e8ec;background:none;
+border:0;border-bottom:1px solid #2a2d33;border-radius:0;padding:6px 0;outline:none}input:focus{border-color:#5a5f68}input::placeholder{color:#3a3e45;letter-spacing:.05em}
+button{font:inherit;color:#d8dbe0;background:none;border:1px solid #2a2d33;border-radius:99px;padding:11px 30px}</style>
+<form id=f><p>Say &ldquo;pair my phone&rdquo; at the desk, then type the code it speaks.</p>
+<input id=c inputmode=numeric autocomplete=one-time-code maxlength=6 placeholder=code aria-label=code autofocus>
+<button>Pair</button><p id=m></p></form><script>
 f.onsubmit = async e => { e.preventDefault();
   const r = await fetch("/api/pair", {method: "POST", headers: {"Content-Type": "application/json"},
     body: JSON.stringify({code: c.value})});
@@ -102,6 +115,13 @@ def write_atomic(path, text, mode=0o600):
     os.replace(tmp, path)
 
 
+def merge(a, b):
+    # jq's `*`, as bin/glitch's reaction() merges the user's reactions.json.
+    if not (isinstance(a, dict) and isinstance(b, dict)):
+        return b
+    return {**a, **{k: merge(a[k], v) if k in a else v for k, v in b.items()}}
+
+
 def frame(ev):
     return f"event: {ev['type']}\ndata: {json.dumps(ev, separators=(',', ':'))}\n\n".encode()
 
@@ -115,11 +135,12 @@ class Portal:
         self.scheme = "http" if a.plain else "https"
         self.lock = threading.Lock()
         self.clients = set()
-        self.state = self.heard = self.reply = None
+        self.state = self.heard = self.reply = self.turn = None
         self.unplayed = {}
         self.pending = {}
         self.devices = (None, set())
         self.pos = 0
+        self.live = False
 
     def log(self, msg):
         print(f"{time.strftime('%T')} {msg}", file=sys.stderr, flush=True)
@@ -181,7 +202,7 @@ class Portal:
     def finish(self, ids, how):
         for i in ids:
             self.unplayed.pop(i, None)
-            if os.path.exists(self.path("clips", i)):
+            if self.live and os.path.exists(self.path("clips", i)):
                 write_atomic(self.path("clips", i + ".played"), how)
 
     def publish(self, ev):
@@ -232,7 +253,7 @@ class Portal:
             else:
                 self.clients.discard(q)
             if self.clients:
-                open(self.path("online"), "a").close()
+                write_atomic(self.path("online"), f"{os.getpid()}\n")
             elif os.path.exists(self.path("online")):
                 os.remove(self.path("online"))
 
@@ -254,16 +275,36 @@ class Portal:
         for ln in lines:
             try:
                 ev = json.loads(ln)
-            except ValueError:
-                continue
-            if isinstance(ev, dict) and isinstance(ev.get("type"), str):
-                self.publish(ev)
+                if isinstance(ev, dict) and isinstance(ev.get("type"), str):
+                    self.publish(ev)
+            except Exception as e:
+                self.log(f"skipped event line: {type(e).__name__}: {e}: {ln[:120]!r}"[:300])
         return buf
 
     def tail(self, buf):
+        n = 0
         while True:
+            n += 1
             time.sleep(0.05)
             buf = self.read_events(buf)
+            if n % 5 == 0:
+                self.watch_turn()
+
+    def watch_turn(self):
+        turn = self.turn_portal()
+        if turn != self.turn:
+            self.turn = turn
+            self.publish({"type": "turn", "turn": turn})
+
+    def reactions(self):
+        home = os.path.dirname(os.path.dirname(os.path.realpath(self.a.glitch)))
+        conf = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+        out = {}
+        for f in (os.path.join(home, "config", "reactions.json"), os.path.join(conf, "glitch", "reactions.json")):
+            v = read_json(f)
+            if isinstance(v, dict):
+                out = merge(out, v)
+        return out
 
     def glitch(self, *args, timeout=30):
         env = dict(os.environ, GLITCH_PORTAL="phone")
@@ -284,18 +325,22 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
-    def handle_one_request(self):
-        self.head_timer = threading.Timer(HEAD_SECONDS, self.cut)
-        self.head_timer.start()
+    def handle(self):
+        self.paired = False
+        self.deadline = threading.Timer(UNPAIRED_SECONDS, self.cut)
+        self.deadline.start()
         try:
-            super().handle_one_request()
+            self.handle_one_request()
         finally:
-            self.head_timer.cancel()
+            self.deadline.cancel()
+            if not self.paired:
+                self.server.unpaired(self.client_address[0], -1)
 
-    def parse_request(self):
-        ok = super().parse_request()
-        self.head_timer.cancel()
-        return ok
+    def vouch(self):
+        self.deadline.cancel()
+        if not self.paired:
+            self.paired = True
+            self.server.unpaired(self.client_address[0], -1)
 
     def cut(self):
         try:
@@ -315,14 +360,13 @@ class Handler(BaseHTTPRequestHandler):
         self.route("POST")
 
     def route(self, method):
-        self.responded = self.body_read = False
+        self.responded = False
         try:
             self.dispatch(method)
         except (BrokenPipeError, ConnectionResetError, TimeoutError, ssl.SSLError):
-            self.close_connection = True
+            pass
         except Exception as e:
             self.p.log(f"{method} {urlsplit(self.path).path}: {type(e).__name__}: {e}"[:300])
-            self.close_connection = True
             if not self.responded:
                 self.send_json(400 if isinstance(e, ValueError) else 500, {"error": "request"})
 
@@ -334,7 +378,9 @@ class Handler(BaseHTTPRequestHandler):
         if method == "POST" and self.headers.get("Origin") != f"{self.p.scheme}://{self.p.host}":
             return self.send_json(403, {"error": "origin"})
         self.key = self.device_key()
-        if (method, path) not in PUBLIC and not self.key:
+        if self.key:
+            self.vouch()
+        elif (method, path) not in PUBLIC:
             if method == "GET" and not path.startswith(("/api/", "/clips/")):
                 return self.send(303, b"", headers={"Location": "/pair"})
             return self.send_json(401, {"error": "unpaired"})
@@ -344,6 +390,8 @@ class Handler(BaseHTTPRequestHandler):
             return fn(parse_qs(url.query)) if fn else self.send_json(404, {"error": "not found"})
         if path == "/api/events":
             return self.events()
+        if path == "/api/reactions":
+            return self.send_json(200, self.p.reactions())
         if path == "/pair":
             return self.send(200, PAIR_PAGE, TYPES[".html"])
         name = path.rsplit("/", 1)[-1]
@@ -370,9 +418,7 @@ class Handler(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length") or 0)
         if not 0 < n <= limit:
             return None
-        data = self.rfile.read(n)
-        self.body_read = True
-        return data
+        return self.rfile.read(n)
 
     def body_json(self):
         data = self.body(4096)
@@ -446,6 +492,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def events(self):
         q = queue.Queue(maxsize=2000)
+        # A phone that leaves the LAN sends no reset: unacknowledged pings end the stream instead.
+        self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT, DEAD_PEER_MS)
         self.p.connect(q, True)
         try:
             self.send_response(200)
@@ -457,7 +505,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.flush()
             while True:
                 try:
-                    msg = q.get(timeout=15)
+                    msg = q.get(timeout=PING_SECONDS)
                 except queue.Empty:
                     msg = b": ping\n\n"
                 if q not in self.p.clients or not self.device_key():
@@ -496,9 +544,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Frame-Options", "DENY")
         for k, v in (headers or {}).items():
             self.send_header(k, v)
-        if not self.body_read and (self.headers.get("Content-Length", "").strip() not in ("", "0")
-                                   or "Transfer-Encoding" in self.headers):
-            self.send_header("Connection", "close")
+        self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(data)
 
@@ -509,9 +555,25 @@ class Server(ThreadingHTTPServer):
     def __init__(self, *args):
         super().__init__(*args)
         self.slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
+        self.guard = threading.Lock()
+        self.hosts = {}
+
+    def unpaired(self, host, n):
+        with self.guard:
+            count = self.hosts.get(host, 0) + n
+            if count > MAX_UNPAIRED_PER_HOST:
+                return False
+            if count:
+                self.hosts[host] = count
+            else:
+                self.hosts.pop(host, None)
+            return True
 
     def process_request(self, request, client_address):
+        if not self.unpaired(client_address[0], 1):
+            return self.shutdown_request(request)
         if not self.slots.acquire(blocking=False):
+            self.unpaired(client_address[0], -1)
             return self.shutdown_request(request)
         super().process_request(request, client_address)
 
@@ -542,6 +604,7 @@ def main():
     if os.path.exists(portal.path("online")):
         os.remove(portal.path("online"))
     buf = portal.read_events()
+    portal.live = True
     try:
         srv = Server((a.addr, a.port), Handler)
         if not a.plain:
