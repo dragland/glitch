@@ -41,9 +41,12 @@ def main():
     with wave.open(tmp, "wb") as w:
         voice.synthesize_wav(text, w)
     env = os.path.splitext(out)[0] + ".env"
-    with open(env + ".tmp", "w") as f:
-        f.write(" ".join(map(str, [ENV_HZ] + envelope(tmp))))
-    os.replace(env + ".tmp", env)
+    try:  # the envelope is decoration: never let it cost the speech
+        with open(env + ".tmp", "w") as f:
+            f.write(" ".join(map(str, [ENV_HZ] + envelope(tmp))))
+        os.replace(env + ".tmp", env)
+    except Exception as e:
+        print(f"speak: no envelope: {e}", file=sys.stderr)
     os.replace(tmp, out)
     return 0
 

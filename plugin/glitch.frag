@@ -1,13 +1,9 @@
 #version 440
-// The glitch creature as one fragment shader. Its patterns, palettes and glows
-// come from Beep Jev (beepjev.replit.app), in CSS px so the numbers match the
-// original. What's added on top:
-//   - the eye is the pattern: texture space is centred on the gaze point and
-//     magnified there, so every pattern grows its own pupil;
-//   - a globe edge: the pattern foreshortens and thins toward a soft rim, so a
-//     drifting pattern reads as turning, not sliding behind a cutout;
-//   - live signals: voice (halo, rim give, rings), token drift, radar, comet,
-//     cell fill, and the context tide.
+// The glitch creature as one fragment shader, in CSS px. Patterns, palettes and
+// glows are Beep Jev's (beepjev.replit.app). The eye is the pattern: texture
+// space is centred on the gaze point and magnified there. The globe edge
+// foreshortens and thins the pattern toward a soft rim, so drift reads as
+// turning. The live-signal uniforms are listed below.
 
 layout(location = 0) in vec2 qt_TexCoord0;
 layout(location = 0) out vec4 fragColor;
@@ -45,7 +41,7 @@ layout(std140, binding = 0) uniform buf {
     float tide;        // context fill 0..1
     float tideShow;    // 0..1: shown while working
     float tidePhase;
-    vec4 pings;        // up to four voice rings, progress 0..1 (0 = off)
+    vec4 pings;        // up to four pings, progress 0..1 (0 = off)
     float pingDir;     // 1 outward (it speaks), -1 inward (you speak)
     float ring;        // excited: ping ring progress 0..1 (0 = off)
 };
@@ -91,7 +87,8 @@ vec4 bands(float v) {
 }
 
 // q: texture space centred on the gaze point, with drift; q0: the same without
-// drift (rings stay centred on the eye).
+// drift, for what must stay put (rings on the eye, the waves' arcs, the noise
+// gradient). Only the lattices drift.
 vec4 patternColor(int pat, vec2 q, vec2 q0, float R) {
     if (pat == 0) {
         // repeating-radial-gradient: primary 14-16px, secondary 29-31px, period 42px.
@@ -114,8 +111,8 @@ vec4 patternColor(int pat, vec2 q, vec2 q0, float R) {
     }
     if (pat == 2) {
         // Waves: halfway between Jev's corner arcs and swells that roll through.
-        vec2 p = q + R;
-        float und = 9.0 * sin(q.x * 0.045 + swellPhase) + 4.0 * sin(q.x * 0.11 - 2.0 * swellPhase + q.y * 0.02);
+        vec2 p = q0 + R;
+        float und = 9.0 * sin(q0.x * 0.045 + swellPhase) + 4.0 * sin(q0.x * 0.11 - 2.0 * swellPhase + q0.y * 0.02);
         return bands(0.5 * length(p) + 0.5 * (p.y + und) + 0.25 * und + swellDrift);
     }
     if (pat == 3) return dots(q + 10.0, 20.0, 2.828);
@@ -127,7 +124,7 @@ vec4 patternColor(int pat, vec2 q, vec2 q0, float R) {
     }
     if (pat == 5) {
         // noise: linear-gradient(135deg, primary, secondary) multiplied with turbulence.
-        float g = clamp(dot(q / (2.0 * R), vec2(0.70710678)) * 0.70710678 + 0.5, 0.0, 1.0);
+        float g = clamp(dot(q0 / (2.0 * R), vec2(0.70710678)) * 0.70710678 + 0.5, 0.0, 1.0);
         return vec4(mix(primary.rgb, secondary.rgb, g) * turbulence(q + R), 1.0);
     }
     // fine: the dot lattice at 60% size and 40% strength, like frosted glass.
@@ -146,7 +143,7 @@ void main() {
     // Outer glow (box-shadow 0 0 blur color2).
     float sigma = max(glowBlur * 0.5, 1.0);
     float outside = max(dn - R, 0.0);
-    // (faded out before the item's edge, so a wide halo never shows a square)
+    // Fade the glow out before the item's edge, or a wide halo shows a square.
     float room = 1.0 - up(d, itemPx * 0.5 - 70.0, itemPx * 0.5 - 2.0);
     vec4 col = pm(secondary, glowAlpha * room * exp(-0.5 * (outside * outside) / (sigma * sigma)));
 
@@ -156,7 +153,7 @@ void main() {
         float w = 4.0 * (1.0 + ring);
         col = over(vec4((1.0 - up(abs(d - rr), w * 0.5 - aa, w * 0.5)) * 0.2 * (1.0 - ring)), col);
     }
-    // Voice rings: one per syllable, leaving when it speaks, arriving when you do.
+    // Pings: one per voice onset (out when it speaks, in when you do) or returning moon.
     for (int i = 0; i < 4; i++) {
         float u = pings[i];
         if (u <= 0.0) continue;

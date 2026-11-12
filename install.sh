@@ -142,7 +142,7 @@ step "Orb shader"
 # rebuild only when the source is newer, so installs don't dirty the checkout.
 qsb_out="$REPO/plugin/glitch.frag.qsb"
 if [[ ! -s $qsb_out || $REPO/plugin/glitch.frag -nt $qsb_out ]]; then
-  # qsb from the system, or from a copy of the package unpacked under $DATA/qsb (no root needed).
+  # the system qsb, else the copy under $DATA/qsb
   if [[ -x /usr/lib/qt6/bin/qsb ]]; then
     /usr/lib/qt6/bin/qsb --qt6 -o "$qsb_out" "$REPO/plugin/glitch.frag"
   elif [[ -x $DATA/qsb/usr/lib/qt6/bin/qsb ]]; then
