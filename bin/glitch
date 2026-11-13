@@ -747,26 +747,29 @@ cmd_open() {
 }
 
 cmd_approve() {
-  local in label ask pick before
+  local in label short ask pick before
   in=$(cat)
-  label=$(jq -r '.tool_name + ": " + ((.tool_input.command // .tool_input.file_path // .tool_input.url // .tool_input.description // (.tool_input | tostring)) | tostring | split("\n")[0] | .[0:110])' <<<"$in" 2>/dev/null)
+  # short (first line, 110 characters) for the desk's menu, state and log; label (whole, capped) for the phone.
+  { IFS= read -r short; label=$(cat); } < <(jq -r '(.tool_name + ": ") as $p
+    | (.tool_input.command // .tool_input.file_path // .tool_input.url // .tool_input.description // (.tool_input | tostring)) | tostring
+    | $p + (split("\n")[0] | .[0:110]), ($p + .)[0:4000]' <<<"$in" 2>/dev/null)
   case $(jq -r .tool_name <<<"$in" 2>/dev/null) in
   Bash) ask="Need you: okay to run that command?" ;;
   Edit | MultiEdit | Write | NotebookEdit) ask="Need you: okay to change that file?" ;;
   WebFetch | WebSearch) ask="Need you: okay to go online for that?" ;;
   *) ask="Need you: okay to do that?" ;;
   esac
-  log "approve? $label"
+  log "approve? $short"
   before=$(cat "$(state_file)" 2>/dev/null)
   REACTION=$(reaction needs_you)
-  set_state needs_you "$label"
+  set_state needs_you "$short"
   cue
   APPROVE_ID=${EPOCHREALTIME/./}$$
   (speech_warm "ask.$APPROVE_ID" && speech_render "$ask" && play "$SPEAK_SLOT.wav"; rm -f "$SPEAK_SLOT".*) </dev/null >/dev/null 2>&1 &
   if [[ $PORTAL == phone ]]; then
     pick=$(phone_approve "$label" "$ask")
   else
-    pick=$(timeout 60 omarchy-menu-select "glitch wants to · $label" "󰄬	Allow once" "󰅖	Deny" -- --width 760 2>/dev/null) || pick=""
+    pick=$(timeout 60 omarchy-menu-select "glitch wants to · $short" "󰄬	Allow once" "󰅖	Deny" -- --width 760 2>/dev/null) || pick=""
     [[ -z $pick ]] && omarchy-menu close >/dev/null 2>&1
     hush
   fi
