@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0a0b0e">
+<meta name="color-scheme" content="dark">
+<title>glitch</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon-192.png">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0a0b0e; color: #9ba0a8;
+    font: 1rem/1.45 system-ui, sans-serif; -webkit-tap-highlight-color: transparent;
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; touch-action: none }
+  #ui { position: fixed; inset: 0; display: flex; flex-direction: column; pointer-events: none;
+    padding-bottom: env(safe-area-inset-bottom) }
+  #text { flex: 1 1 0; min-height: 0; margin-top: var(--top, 60dvh); padding: 0 28px 20px; overflow-y: auto;
+    overscroll-behavior: contain; touch-action: pan-y; pointer-events: auto; text-align: center; scrollbar-width: none }
+  .below { -webkit-mask-image: linear-gradient(#000 calc(100% - min(56px, 35%)), transparent);
+    mask-image: linear-gradient(#000 calc(100% - min(56px, 35%)), transparent) }
+  .above { -webkit-mask-image: linear-gradient(transparent, #000 32px); mask-image: linear-gradient(transparent, #000 32px) }
+  .above.below { -webkit-mask-image: linear-gradient(transparent, #000 32px, #000 calc(100% - min(56px, 35%)), transparent);
+    mask-image: linear-gradient(transparent, #000 32px, #000 calc(100% - min(56px, 35%)), transparent) }
+  #text p { margin: 0 auto; max-width: 24em; overflow-wrap: anywhere }
+  #said { font-size: 1.0625rem; color: #a9aeb6 }
+  #line { font-size: 1.25rem; line-height: 1.4; color: #eceef1 }
+  #line.status { font-size: .9375rem; color: #9ba0a8; font-variant-numeric: tabular-nums }
+  #said:not(:empty) + #line:not(:empty) { margin-top: 10px }
+  .w { opacity: 0; transition: opacity .22s ease-out }
+  .w.on { opacity: 1 }
+  #hint { margin-top: 12px !important; font-size: .875rem; color: #9ba0a8 }
+  #more { max-width: 34em; margin: 22px auto 0; text-align: left; font-size: 1rem; line-height: 1.55; color: #b4b9c0;
+    user-select: text; -webkit-user-select: text; animation: in .4s ease-out }
+  #more p { margin: 0 0 12px; max-width: none }
+  #more pre { margin: 0 0 12px; padding: 10px 12px; background: #13151a; border-radius: 10px; overflow-x: auto;
+    white-space: pre; scrollbar-width: none; font: .8125rem/1.5 ui-monospace, monospace; color: #c9cdd3 }
+  #more code { font: .875rem ui-monospace, monospace; color: #c9cdd3; background: #13151a; padding: 1px 5px; border-radius: 5px }
+  @keyframes in { from { opacity: 0 } }
+  #foot { flex: 0 1 auto; min-height: 0; display: flex; flex-direction: column; align-items: center; padding: 8px 20px 24px;
+    text-align: center }
+  #foot > * { pointer-events: auto }
+  button { font: inherit }
+  .pill { box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; min-height: 48px;
+    padding: 12px 26px; font-size: 1rem; color: #d8dbe0; border: 1px solid #2a2d33; border-radius: 99px; background: none;
+    text-decoration: none }
+  .pill:active { background: #16181d }
+  .pill:disabled { opacity: .4 }
+  #stop { margin-top: 4px }
+  #ask { width: 100%; max-width: 34em; min-height: 0; display: flex; flex-direction: column }
+  #q { flex: none; margin: 0 0 10px; color: #eceef1; font-size: 1.0625rem }
+  #n { display: block; margin-top: 2px; color: #9ba0a8; font-size: .8125rem }
+  #cmd { position: relative; min-height: 0; display: flex; flex-direction: column; margin: 0 0 14px; background: #13151a;
+    border-radius: 10px; overflow: hidden }
+  #label { box-sizing: border-box; margin: 0; min-height: 0; max-height: 18dvh; overflow: auto; overscroll-behavior: contain; text-align: left; white-space: pre-wrap;
+    overflow-wrap: anywhere; padding: 10px 12px; color: #c9cdd3; font: .8125rem/1.45 ui-monospace, monospace;
+    user-select: text; -webkit-user-select: text }
+  .dim { color: #6b7079 }
+  #rest { position: absolute; right: 10px; bottom: 6px; font-size: .75rem; color: #9ba0a8; pointer-events: none }
+  #drain { flex: none; height: 2px; background: #3a3e46; transform-origin: left }
+  #long { flex: none; margin: -4px 0 12px; font-size: .875rem; color: #9ba0a8 }
+  #ask .row { flex: none; display: flex; gap: 10px }
+  #ask .row .pill { flex: 1 }
+  #allow { border-color: #d8dbe0; background: #d8dbe0; color: #0a0b0e }
+  #allow:active { background: #fff }
+  #offer { display: flex; align-items: center; justify-content: center; gap: 10px; font-size: .875rem; color: #9ba0a8 }
+  #offer .pill { min-width: 64px }
+  #spoken, .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%) }
+  [hidden] { display: none !important }
+</style>
+<canvas id="orb" role="button" aria-label="glitch: hold to talk"></canvas>
+<div id="ui">
+  <div id="text"><p id="said"></p><p id="line"></p><p id="hint" hidden>tap the orb to hear it</p><div id="more" hidden></div></div>
+  <div id="foot">
+    <div id="ask" hidden><p id="q"><span id="qt"></span><span id="n" hidden></span></p><div id="cmd"><pre id="label"></pre><span id="rest" hidden></span><div id="drain"></div></div>
+      <p id="long" hidden>too long to review here</p>
+      <div class="row"><button id="deny" class="pill">Deny</button><button id="allow" class="pill">Allow once</button></div></div>
+    <button id="stop" class="pill" hidden>Stop</button>
+    <!-- Chrome for Android: intent:, and only to a BROWSABLE activity (Tailscale's tailscale://navigate). -->
+    <div id="away" hidden><a href="intent://navigate#Intent;scheme=tailscale;package=com.tailscale.ipn;S.browser_fallback_url=https%3A%2F%2Fplay.google.com%2Fstore%2Fapps%2Fdetails%3Fid%3Dcom.tailscale.ipn;end" class="pill">Open Tailscale</a></div>
+    <button id="install" class="pill" hidden>Add to home screen</button>
+    <div id="offer" hidden><span>Get notified when glitch finishes?</span><button id="yes" class="pill">Yes</button><button id="no" class="pill">No</button></div>
+  </div>
+</div>
+<p id="spoken" aria-live="polite"></p>
+<script type="module" src="/app.js"></script>
+</html>

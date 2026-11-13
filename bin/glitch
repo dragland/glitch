@@ -7,10 +7,14 @@
 #   glitch toggle [--new]  start recording, or stop and send (Super+D / Super+Alt+D)
 #   glitch open            open the current session in a terminal (Super+Alt+Shift+D)
 #   glitch cancel          stop recording, the running turn and speech (Super+Alt+Backspace)
-#   glitch new             forget the current session
+#   glitch new             start a fresh session (after the running turn)
 #   glitch hush            stop speaking
 #   glitch say <text>      speak text with glitch's voice
 #   glitch state           print the current orb state
+#   glitch pair            speak a code that pairs a phone with the portal (2 minutes)
+#   glitch unpair          forget every paired phone
+#   glitch portal          run the phone portal's server
+#   glitch cert [--renew]  make the portal's certificate, and the CA file the phone installs
 #
 # Defaults in <repo>/config, overrides in ~/.config/glitch, downloads in
 # ~/.local/share/glitch, live state in $XDG_RUNTIME_DIR/glitch.
@@ -28,9 +32,14 @@ mkdir -p "$RT"
 . "$GLITCH_HOME/config/glitch.conf"
 # shellcheck source=/dev/null
 [[ -f $USER_CONF/glitch.conf ]] && . "$USER_CONF/glitch.conf"
-export GLITCH_BEEP_VOLUME="${BEEP_VOLUME:-1.0}" MIND JEV_MODEL OPENAI_DECIDE_MODEL
+export GLITCH_BEEP_VOLUME="${BEEP_VOLUME:-2.0}" MIND JEV_MODEL OPENAI_DECIDE_MODEL
 
 PY="$DATA/venv/bin/python"
+PORTAL=desk
+[[ ${GLITCH_PORTAL:-} == phone ]] && PORTAL=phone
+export GLITCH_PORTAL=$PORTAL
+PH="$RT/phone"
+[[ $PORTAL == phone ]] && mkdir -p "$PH/clips"
 CUE="$GLITCH_HOME/libexec/cue"
 DECIDE="$GLITCH_HOME/libexec/decide"
 SPEAK_HELPER="$GLITCH_HOME/libexec/speak"
@@ -46,17 +55,142 @@ log() { printf '%(%T)T.%s %s\n' -1 "${EPOCHREALTIME:11:3}" "$*" >>"$RT/glitch.lo
 
 write_atomic() { printf '%s\n' "$2" >"$1.$$" && mv "$1.$$" "$1"; }
 
-set_state() {
-  local json
-  json=$(jq -cn --arg s "$1" --argjson reaction "${REACTION:-null}" '{state:$s, reaction:$reaction}')
-  write_atomic "$RT/state.json" "$json"
-  log "state $1 ${2:-}"
-  omarchy-shell -q glitch set "$json" >/dev/null 2>&1 || true
+# jqs FILTER [OPTION...] -- STRING...: jq -c with $s the array of STRINGs. They go in on
+# stdin because an agent's text can pass Linux's 128 KiB limit on one argument. No bash
+# string holds a NUL, so NUL separates them.
+jqs() {
+  local f=$1 o=()
+  shift
+  while (($#)) && [[ $1 != -- ]]; do o+=("$1"); shift; done
+  shift
+  printf '%s\0' "$@" | jq -cRs "${o[@]}" "(split(\"\\u0000\") | .[:-1]) as \$s | $f"
 }
 
-# A live signal for the orb (listed at the top of plugin/Glitch.qml). A file the
+# CLOCK: centiseconds since boot, which an NTP step doesn't move. libexec/portal reads
+# the same clock as CLOCK_BOOTTIME.
+clock() { local s; read -r s _ </proc/uptime; CLOCK=$((10#${s/./})); }
+
+# In vis, \p{DI} is Oniguruma's Default_Ignorable_Code_Point (variation selectors,
+# Hangul fillers) and U+2800 is the blank braille cell.
+# shellcheck disable=SC2016 # jq, not bash
+JQ_DEFS='
+def hex: if . < 16 then "0123456789ABCDEF"[.:.+1] else (. / 16 | floor | hex) + (. % 16 | hex) end;
+def vis: gsub("(?<c>(?![\n\t ])[\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}\\p{Zs}\\p{Co}\\p{Cn}\\p{DI}\\x{2800}])"; "\\u{\(.c | explode[0] | hex)}");
+def clip(n): if length > n then .[0:n] + "…" else . end;
+def base: tostring | sub("/+$"; "") | split("/") | last // "";
+def named(d): if . == "" then d else . end;
+def host: tostring | sub("^[a-zA-Z][a-zA-Z0-9+.-]*://"; "") | sub("[/?#].*$"; "") | sub("^[^@]*@"; "") | sub(":[0-9]+$"; "") | sub("^www\\."; "");
+def opts($with): if length == 0 then . elif .[0] == "--" then .[1:]
+  elif .[0] | test("^(" + $with + ")$") then .[2:] | opts($with)
+  elif .[0] | test("^-") then .[1:] | opts($with) else . end;
+def wopts($with): opts($with) | if length > 0 and (.[0] | test("^[0-9.]+[smhd]?$")) then .[1:] | wopts($with) else . end;
+def word: sub("^[\"\u0027]+"; "") | sub("[\"\u0027;&|()<>`].*$"; "");
+def lead: sub("^\\s+"; "") | sub("^[(\"\u0027]+"; "") | sub("^cd(\\s[^;&|]*)?(&&|;)"; "");
+def shell:
+  def prog: if length == 0 then "a command"
+  elif .[0] | test("^[A-Za-z_][A-Za-z0-9_]*\\+?=") then if .[0] | test("\\$\\(|`") then "a script" else .[1:] | prog end
+  elif .[0] | test("^[0-9&]*[<>]+$") then .[2:] | prog
+  elif .[0] | test("^[0-9&]*[<>]") then .[1:] | prog
+  elif .[0] | test("^(for|if|while|until|case|select|function|do|then|else|elif|export|local|declare|readonly|set|\\[\\[|\\[|\\{|!|\\(\\(.*)$") then "a script"
+  else (.[0] | word | base) as $p |
+    if $p == "command" and (.[1] // "" | test("^-[vV]$")) then "command"
+    elif $p | test("^(sudo|doas|pkexec|env|timeout|nice|ionice|nohup|time|command|exec|xargs|setsid|stdbuf)$") then
+      .[1:] | wopts({sudo: "-[ugCDhprtU]", doas: "-[uC]", env: "-[uCS]", timeout: "-[sk]", nice: "-n", ionice: "-[cnp]",
+        xargs: "-[InPdLaEs]", stdbuf: "-[ioe]"}[$p] // "") | prog
+    elif ($p | test("^(ba|z|da)?sh$")) and (.[1:3] | any(test("^-[a-z]*c[a-z]*$"))) then
+      (if .[1] | test("c") then .[2:] else .[3:] end) | join(" ") | shell
+    elif $p == "" or ($p | test("[$`{}*?\\\\]")) then "a command"
+    elif $p | test("^(git|npm|pnpm|yarn|bun|cargo|go|make|systemctl|docker|podman|pacman|yay|uv|pip|pip3|gh|kubectl)$") then
+      (.[1:] | opts("-[CcfHRn]|--(git-dir|work-tree|namespace|context|repo|directory|file|host)") | .[0] // "" | word) as $s
+      | $p + (if $s | test("^[a-z][a-z0-9-]*$") then " " + $s else "" end)
+    else $p end
+  end;
+  (split("\n") | map(select(test("^\\s*(#|$)") | not)) | first // "") | until(lead == .; lead)
+  | [splits("\\s+")] | map(select(. != "")) | prog;
+def mcp: if test("^claude-in-chrome$") then "using the browser"
+  else sub("^(plugin_|claude_ai_)"; "") | gsub("[_-]+"; " ") | ascii_downcase | sub("^(?<w>\\S+) \\k<w>$"; "\(.w)") | if . == "" then "working" else "using " + . end end;
+def status(n; i): (i // {}) as $i |
+  if n | test("^(Bash|Shell)$") then "running " + ($i.command // "" | tostring | shell)
+  elif n | test("^(Read|NotebookRead)$") then "reading " + ($i.file_path // $i.notebook_path // "" | base | named("a file"))
+  elif n == "LS" then "listing " + ($i.path // "" | base | named("files"))
+  elif n | test("^(Edit|MultiEdit|NotebookEdit)$") then "editing " + ($i.file_path // $i.notebook_path // "" | base | named("a file"))
+  elif n == "Write" then "writing " + ($i.file_path // "" | base | named("a file"))
+  elif n == "Delete" then "deleting " + ($i.file_path // "" | base | named("a file"))
+  elif n == "Grep" then "searching files"
+  elif n == "Glob" then "finding files"
+  elif n == "WebFetch" then "reading " + ($i.url // "" | host | named("a web page"))
+  elif n == "WebSearch" then "searching the web"
+  elif n == "ToolSearch" then "looking up tools"
+  elif n | test("^(Task|Agent)$") then "delegating"
+  elif n | test("^(TodoWrite|TaskCreate|TaskUpdate)$") then "updating the to-do list"
+  elif n == "Skill" then "loading a skill"
+  elif n | test("^(BashOutput|TaskOutput)$") then "checking a background command"
+  elif n | test("^(KillShell|KillBash|TaskStop)$") then "stopping a background command"
+  elif n == "Monitor" then "watching a background command"
+  elif n | test("^mcp__.+__") then n | capture("^mcp__(?<s>.+?)__").s | mcp
+  else "working" end
+  | gsub("[\t\n]"; " ") | vis | clip(60);
+'
+
+state_file() { if [[ $PORTAL == phone ]]; then echo "$PH/state.json"; else echo "$RT/state.json"; fi; }
+
+set_state() {
+  local json
+  json=$(jq -cn --arg s "$1" --argjson reaction "${REACTION:-null}" --arg status "${3:-}" --arg portal "$PORTAL" \
+    '{state:$s, reaction:$reaction} + if $portal == "phone" then {status:$status} else {} end')
+  write_atomic "$(state_file)" "$json"
+  log "state $1 ${2:-}"
+  orb_set "$json" "${2:-}"
+}
+
+orb_set() {
+  if [[ $PORTAL == phone ]]; then
+    # shellcheck disable=SC2016 # jq, not bash
+    phone_send "$(jqs '{type:"state"} + ($s[0] | fromjson) + {detail:$s[1]}' -- "$1" "${2:-}")"
+  else
+    omarchy-shell -q glitch set "$1" >/dev/null 2>&1 || true
+  fi
+}
+
+# printf writes a long line in several write() calls, so writers take the lock to
+# keep lines whole.
+phone_send() {
+  [[ -n $1 ]] || { log "phone: ${FUNCNAME[1]} made no event"; return 1; }
+  { flock 3 && printf '%s\n' "$1" >&3; } 3>>"$PH/events.jsonl"
+}
+
+page_online() {
+  local pid
+  { read -r pid <"$PH/online"; } 2>/dev/null && kill -0 "$pid" 2>/dev/null
+}
+
+clip_sent() {
+  CLIP=$2
+  # The sample rate is at byte 24 of the 44-byte WAV header; cue and Piper write 16-bit mono.
+  CLIP_MS=$((($(stat -c %s "$PH/clips/$2") - 44) * 500 / $(od -An -j24 -N4 -tu4 "$PH/clips/$2")))
+  phone_send "$(jq -cn --arg id "$2" --arg kind "$1" --argjson ms "$CLIP_MS" --arg env "${3:-}" --arg with "${4:-}" \
+    --arg lead "${5:-0}" --arg approve "${APPROVE_ID:-}" 'def opt: if . == "" then null else . end;
+    {type:"clip", id:$id, kind:$kind, ms:$ms, env:($env | opt), with:($with | opt),
+     delay:(if $with == "" then 0 else $lead | tonumber * 1000 | round end), approve:($approve | opt)}')"
+}
+
+# A live signal for the orb (listed at the top of plugin/orb.mjs). A file the
 # orb tails, because IPC costs a process per call.
-ev() { printf '%s\n' "$*" >>"$RT/orb.events"; }
+ev() {
+  if [[ $PORTAL == phone ]]; then
+    local l=${*//\\/\\\\}
+    phone_send "{\"type\":\"signal\",\"line\":\"${l//\"/\\\"}\"}"
+  else
+    printf '%s\n' "$*" >>"$RT/orb.events"
+  fi
+}
+
+turn_portal() {
+  local portal pid
+  { read -r portal pid <"$RT/turn.portal"; } 2>/dev/null && kill -0 "$pid" 2>/dev/null && echo "$portal"
+}
+
+recording() { [[ $PORTAL == desk && -e $RT/recording ]]; }
 
 current_sid() {
   local f="$RT/sid"
@@ -70,19 +204,39 @@ forget_session() {
   close_card
 }
 
-reaction() {
+reactions() {
   local files=("$GLITCH_HOME/config/reactions.json")
   [[ -f $USER_CONF/reactions.json ]] && files+=("$USER_CONF/reactions.json")
-  jq -cs --arg k "$1" '(reduce .[] as $f ({}; . * $f)) | getpath($k | split(".")) // .mood.calm' "${files[@]}" 2>/dev/null || echo null
+  jq -cs "${@:2}" "(reduce .[] as \$f ({}; . * \$f)) | $1" "${files[@]}" 2>/dev/null
 }
+
+# shellcheck disable=SC2016 # jq, not bash
+reaction() { reactions 'getpath($k | split(".")) // .mood.calm' --arg k "$1" || echo null; }
 
 voice_prompt() {
   if [[ -f $USER_CONF/voice-prompt.md ]]; then cat "$USER_CONF/voice-prompt.md"; else cat "$GLITCH_HOME/config/voice-prompt.md"; fi
+  if [[ $PORTAL == phone ]]; then printf '\n%s\n' "$PHONE_PROMPT"; fi
 }
 
 cue() {
   [[ $BEEPS == 1 && -x $PY && ${REACTION:-null} != null ]] || return 0
+  if [[ $PORTAL == phone ]]; then
+    local id="${EPOCHREALTIME/./}-cue.wav"
+    "$PY" -I "$CUE" --out "$PH/clips/$id" "$@" "$REACTION" </dev/null >/dev/null 2>>"$RT/glitch.log" 8>&- 9>&- && clip_sent cue "$id"
+    return 0
+  fi
   setsid "$PY" -I "$CUE" "$@" "$REACTION" </dev/null >/dev/null 2>>"$RT/glitch.log" 8>&- 9>&- &
+}
+
+CHIMES=(start stop unsure)
+chime() {
+  local r=listening args
+  case $1 in
+  start) args=(--notes "440,587") ;;
+  stop) args=(--notes "587,440") ;;
+  unsure) r=mood.unsure args=(--beeps 1) ;;
+  esac
+  REACTION=$(reaction "$r") cue "${args[@]}" "${@:2}"
 }
 
 # --- speech -------------------------------------------------------------------
@@ -108,6 +262,16 @@ speech_render() {
 play() {
   local rc
   [[ -s $1 ]] || return 0
+  if [[ $PORTAL == phone ]]; then
+    local name=${1##*/} id end
+    id="${EPOCHREALTIME/./}-${name%%.*}.wav"
+    cp "$1" "$PH/clips/$id" && clip_sent "${name%%.*}" "$id" "$(cat "${1%.wav}.env" 2>/dev/null)" "${2:-}" "${3:-}" || return 0
+    clock
+    end=$((CLOCK + (CLIP_MS + 2000) / 10))
+    while page_online && [[ ! -e $PH/clips/$id.played ]] && clock && ((CLOCK < end)); do sleep 0.1; done
+    [[ $(cat "$PH/clips/$id.played" 2>/dev/null) != hushed ]]
+    return
+  fi
   pw-play "$1" 2>/dev/null 8>&- 9>&- &
   echo $! >"$RT/speak.pid"
   wait $! 2>/dev/null
@@ -118,6 +282,10 @@ play() {
 
 hush() {
   local pid
+  if [[ $PORTAL == phone ]]; then
+    phone_send '{"type":"hush"}'
+    return 0
+  fi
   pid=$(cat "$RT/speak.pid" 2>/dev/null) || return 1
   kill "$pid" 2>/dev/null
   rm -f "$RT/speak.pid"
@@ -169,10 +337,10 @@ recent_history() {
 
 live_decide() {
   [[ -x $PY ]] || return 0
-  write_atomic "$RT/live.in" "$(jq -cn --arg user "$1" --arg activity "$2" --arg words "$3" \
-    --argjson history "$(recent_history "$SID")" \
-    --argjson speech "$(cat "$RT/speech.json" 2>/dev/null || echo null)" \
-    '{phase:"working", user:$user, activity:$activity, words:$words, history:$history, speech:$speech, deadline:3}')"
+  # shellcheck disable=SC2016 # jq, not bash
+  write_atomic "$RT/live.in" "$(jqs '{phase:"working", user:$s[0], activity:$s[1], words:$s[2],
+    history:($s[3] | fromjson), speech:($s[4] | fromjson), deadline:3}' -- "$1" "$2" "$3" \
+    "$(recent_history "$SID")" "$(cat "$RT/speech.json" 2>/dev/null || echo null)")"
   setsid "$0" _live </dev/null >/dev/null 2>>"$RT/glitch.log" 8>&- 9>&- &
 }
 
@@ -187,11 +355,11 @@ cmd_live() {
     rm -f "$RT/live.pid"
     r=$(cat "$RT/live.out" 2>/dev/null)
     [[ -n $r && -e $RT/turn.pid ]] || continue
-    state=$(cat "$RT/state.json" 2>/dev/null)
+    state=$(cat "$(state_file)" 2>/dev/null)
     [[ $(jq -r .state <<<"$state" 2>/dev/null) =~ ^(thinking|tool)$ ]] || continue
     write_atomic "$RT/live.json" "$r"
     log "live $r"
-    omarchy-shell -q glitch set "$(jq -c --argjson r "$r" '.reaction = $r' <<<"$state")" >/dev/null 2>&1
+    orb_set "$(jq -c --argjson r "$r" '.reaction = $r' <<<"$state")"
   done
   exec 7>&-
   [[ -e $RT/live.in ]] && exec "$0" _live
@@ -206,22 +374,23 @@ stop_live() {
 
 # --- agent adapters ---------------------------------------------------------------
 # An adapter reads the prompt on stdin, takes an optional session id, and emits
-# lines: "sid <id>", "mode <permission mode>", "tool <category>\t<id>\t<label>",
+# lines: "sid <id>", "mode <permission mode>", "tool <category>\t<id>\t<label>\t<phrase>",
 # "toolend <id>", "words <text>", "ctx <tokens in context>", "window <context
 # window>", "say <text>", "mood <word>", "result <json string>", "error <text>",
 # "denied <n>", then "exit <status>" last. Tool categories: look, make, run,
-# delegate. A subagent's own tool calls are dropped. `toolend` comes when the
-# call's work is done, which for a background subagent is later than its tool
-# result. `ctx` and `window` are Claude's only: Codex reports neither, so it
-# shows no tide.
+# delegate. The phrase is the phone's status line (jq `status`). A subagent's own
+# tool calls are dropped. `toolend` comes when the call's work is done, which for a
+# background subagent is later than its tool result. `ctx` and `window` are Claude's
+# only: Codex reports neither, so it shows no tide.
 
 adapter_claude() {
   local sid=${1:-} args
   # Nothing can answer a permission prompt in -p mode, so the hook sends each
   # one to `glitch _approve`.
-  local hook
-  hook=$(jq -cn --arg cmd "$GLITCH_HOME/bin/glitch _approve" \
-    '{hooks: {PermissionRequest: [{matcher: "*", hooks: [{type: "command", command: $cmd, timeout: 75}]}]}}')
+  local hook wait=75
+  [[ $PORTAL == phone ]] && wait=$((PORTAL_APPROVE_TIMEOUT + 15))
+  hook=$(jq -cn --arg cmd "$GLITCH_HOME/bin/glitch _approve" --argjson wait "$wait" \
+    '{hooks: {PermissionRequest: [{matcher: "*", hooks: [{type: "command", command: $cmd, timeout: $wait}]}]}}')
   args=(-p --output-format stream-json --verbose --include-partial-messages
     --permission-mode auto --permission-prompts none --settings "$hook" --chrome
     --append-system-prompt "$(voice_prompt)")
@@ -229,8 +398,7 @@ adapter_claude() {
   # stream-json requires --verbose. SIGINT ends a turn cleanly (SIGTERM leaves
   # it unrecorded).
   timeout --signal=INT --kill-after=15 "$TURN_TIMEOUT" claude "${args[@]}" 2>>"$RT/glitch.log" 9>&- |
-    jq --unbuffered -rR 'fromjson? // empty |
-    def clip(n): if length > n then .[0:n] + "…" else . end;
+    jq --unbuffered -rR "$JQ_DEFS"'fromjson? // empty |
     def tlabel: .name + (
       (.input.file_path // .input.path // .input.command // .input.pattern // .input.url // .input.description // "")
       | tostring | (split("\n")[0] // "") | gsub("\t"; " ") | sub("^/home/[^/]+/"; "~/") | if . == "" then "" else ": " + clip(48) end);
@@ -245,7 +413,7 @@ adapter_claude() {
       (.event.delta // {} | (.text // .thinking // empty) | "words \(gsub("\\s+"; " "))")
     elif .type == "system" and .subtype == "init" then "sid \(.session_id)", "mode \(.permissionMode // "?")"
     elif .type == "assistant" and .parent_tool_use_id == null then
-      (.message.content[]? | select(.type == "tool_use") | "tool \(tcat)\t\(.id | id)\t\(tlabel)"),
+      (.message.content[]? | select(.type == "tool_use") | "tool \(tcat)\t\(.id | id)\t\(tlabel)\t\(status(.name; .input))"),
       (.message.usage // empty | "ctx \((.input_tokens // 0) + (.cache_read_input_tokens // 0) + (.cache_creation_input_tokens // 0))")
     elif .type == "user" and .parent_tool_use_id == null then
       # The result of a background subagent only says it was launched; the
@@ -282,8 +450,7 @@ adapter_codex() {
   if [[ -n $sid ]]; then args=(exec resume "${args[@]}" "$sid" -); else args=(exec "${args[@]}" -); fi
   # SIGINT ends a turn cleanly (it's recorded as interrupted and stays resumable).
   timeout --signal=INT --kill-after=15 "$TURN_TIMEOUT" codex "${args[@]}" 2>>"$RT/glitch.log" 9>&- |
-    jq --unbuffered -nrR --arg cwd "$PWD/" '
-    def clip(n): if length > n then .[0:n] + "…" else . end;
+    jq --unbuffered -nrR --arg cwd "$PWD/" "$JQ_DEFS"'
     def short: tostring | (split("\n")[0] // "") | gsub("\t"; " ") | ltrimstr($cwd) | sub("^/home/[^/]+/"; "~/") | clip(48);
     def unwrap: sub("^(/usr)?/bin/(ba|z)?sh -l?c "; "") | sub("^\u0027(?<c>.*)\u0027$"; "\(.c)") | sub("^\"(?<c>.*)\"$"; "\(.c)");
     def tagline(k): [.[] | select(test("^\\s*" + k + ":"))] | last // "" | sub("^\\s*" + k + ":\\s*"; "");
@@ -299,8 +466,15 @@ adapter_codex() {
       elif .type == "collab_tool_call" then
         if .tool == "spawn_agent" then "delegate\tAgent: \(.prompt // "" | short)" else empty end
       else empty end;
+    def status: if .type == "command_execution" then "running " + (.command // "" | tostring | shell)
+      elif .type == "file_change" then
+        ({add: "writing ", delete: "deleting "}[.changes[0].kind // ""] // "editing ") + (.changes[0].path // "" | base | named("a file"))
+      elif .type == "web_search" then "searching the web"
+      elif .type == "mcp_tool_call" then .server // "" | mcp
+      elif .type == "collab_tool_call" then "delegating"
+      else "working" end | gsub("[\t\n]"; " ") | vis | clip(60);
     def id: .id | tostring | gsub("\\s"; "_");
-    def tool: id as $id | toolline | sub("\t"; "\t\($id)\t") | "tool \(.)";
+    def tool: id as $id | status as $st | toolline | sub("\t"; "\t\($id)\t") | "tool \(.)\t\($st)";
     def toolend: id as $id | toolline | "toolend \($id)";
     # Some items arrive only as item.completed (Codex batches shell calls
     # without an item.started), so a tool line is emitted on whichever comes first.
@@ -389,14 +563,14 @@ cmd_start() {
   voxtype record start --file="$RT/utterance.txt" --no-osd 2>>"$RT/glitch.log"
   REACTION=$(reaction listening)
   set_state listening
-  cue --notes 440,587
+  chime start
   # voxtype cuts a recording at its cap, so send just before it.
   setsid bash -c "sleep $((RECORD_LIMIT - 10)); [[ \$(cat '$RT/recording' 2>/dev/null) == $stamp ]] && exec '$0' stop" \
     </dev/null >/dev/null 2>&1 8>&- 9>&- &
 }
 
 cmd_stop() {
-  local out rc text started bare
+  local out rc text started speech
   mv "$RT/recording" "$RT/recording.$$" 2>/dev/null || return 0
   started=$(cat "$RT/recording.$$")
   rm -f "$RT/recording.$$"
@@ -408,58 +582,80 @@ cmd_stop() {
   fi
   REACTION=$(reaction listening)
   set_state transcribing
-  cue --notes 587,440
+  chime stop
   out=$(voxtype record stop --wait --json --wait-file "$RT/utterance.txt" --timeout 30 2>>"$RT/glitch.log")
   rc=$?
   text=$(tr '\n' ' ' 2>/dev/null <"$RT/utterance.txt" | sed 's/^ *//;s/ *$//')
   rm -f "$RT/utterance.txt"
   log "stop rc=$rc out=$out text=$text"
-  jq -cn --argjson ms "$(((${EPOCHREALTIME/./} - started) / 1000))" --argjson words "$(wc -w <<<"$text")" \
-    '($ms / 1000) as $s | {seconds: ($s * 10 | round / 10), wps: (if $s > 0 then $words / $s * 10 | round / 10 else 0 end)}' \
-    >"$RT/speech.json" 2>/dev/null
+  speech=$(speech_stats $(((${EPOCHREALTIME/./} - started) / 1000)) "$text")
+  local fresh=false
+  [[ -e $RT/force-new ]] && fresh=true
+  rm -f "$RT/force-new"
+  ((rc == 0)) || text=""
+  heard "$text" "$fresh" "$speech" >/dev/null
+}
+
+speech_stats() {
+  jq -cn --argjson ms "$1" --argjson words "$(wc -w <<<"$2")" \
+    '($ms / 1000) as $s | {seconds: ($s * 10 | round / 10), wps: (if $s > 0 then $words / $s * 10 | round / 10 else 0 end)}' 2>/dev/null
+}
+
+# Prints empty, pair, unpair, fresh or turn: libexec/portal's /api/talk outcome.
+heard() {
+  local text=$1 fresh=${2:-false} speech=${3:-} bare cmd=""
   # Whisper invents these from silence.
   bare=$(tr -d '[:punct:]' <<<"${text,,}" | sed 's/^ *//;s/ *$//')
   case "$bare" in
   you | "thank you" | "thanks for watching" | blankaudio | "blank audio" | bye | music) text="" ;;
   esac
-  if ((rc != 0)) || [[ -z $text ]]; then
-    rm -f "$RT/force-new"
-    REACTION=$(reaction mood.unsure) cue --beeps 1
-    set_state idle "didn't catch that"
+  if [[ -z $text ]]; then
+    chime unsure
+    set_state idle "didn't catch that" "didn't catch that"
+    echo empty
     return
   fi
 
   shopt -s nocasematch
-  if [[ $text =~ ^(start\ a\ )?new\ (task|chat|session|conversation)[[:punct:]]*\ *(.*)$ ]]; then
-    touch "$RT/force-new"
+  if [[ $PORTAL == desk && -n $PORTAL_ADDR && -f $PORTAL_CERT && $text =~ ^(un-?)?pair\ (my|the)\ phone[[:punct:]]*$ ]]; then
+    cmd=pair
+    [[ -n ${BASH_REMATCH[1]} ]] && cmd=unpair
+  elif [[ $text =~ ^(start\ a\ )?new\ (task|chat|session|conversation)[[:punct:]]*\ *(.*)$ ]]; then
+    fresh=true
     text=${BASH_REMATCH[3]}
   fi
   shopt -u nocasematch
-  local fresh=false
-  if [[ -e $RT/force-new ]]; then
-    rm -f "$RT/force-new"
-    forget_session
-    fresh=true
-  fi
-  if [[ -z $text ]]; then
-    REACTION=$(reaction mood.calm) set_state done "fresh session"
-    REACTION=$(reaction mood.calm) cue --beeps 2
+  if [[ -n $cmd ]]; then
+    REACTION=$(reaction mood.calm) set_state done "$cmd"
+    "cmd_$cmd" </dev/null >/dev/null 2>&1 8>&- &
+    echo "$cmd"
     return
   fi
-
-  setsid "$0" _turn "$text" "$fresh" </dev/null >/dev/null 2>&1 8>&- &
+  setsid "$0" _turn "$text" "$fresh" "$speech" </dev/null >/dev/null 2>&1 8>&- &
+  if [[ -z $text ]]; then echo fresh; else echo turn; fi
 }
 
 cmd_turn() {
   local text=$1 fresh=${2:-false} agent kind rest result="" say="" mood="" denied=0
   local failed="" exit_code="" replied=false body words="" activity="" last_decide=0 fin
-  local tcat id window contour
+  local tcat id status window contour lead=0.4
   exec 9>"$RT/turn.lock"
+  if [[ -z $text ]]; then
+    flock 9
+    forget_session
+    REACTION=$(reaction mood.calm) set_state done "fresh session"
+    REACTION=$(reaction mood.calm) cue --beeps 2
+    return
+  fi
   if ! flock -n 9; then
-    set_state thinking "waiting for the last request"
+    set_state thinking "waiting for the last request" "waiting for the last request"
     flock 9
   fi
+  trap 'rm -f "$RT/turn.portal"' EXIT
+  write_atomic "$RT/turn.portal" "$PORTAL $$"
   echo $$ >"$RT/turn.pid"
+  [[ $fresh == true ]] && forget_session
+  [[ -n ${3:-} ]] && write_atomic "$RT/speech.json" "$3"
 
   agent=$(agent_name)
   SID=""
@@ -467,13 +663,20 @@ cmd_turn() {
   log "turn agent=$agent sid=${SID:-new} text=$text"
   rm -f "$RT/live.json" "$RT/live.in"
   (($(stat -c %s "$RT/orb.events" 2>/dev/null || echo 0) > 200000)) && : >"$RT/orb.events"
+  if [[ $PORTAL == phone ]]; then
+    (($(stat -c %s "$PH/events.jsonl" 2>/dev/null || echo 0) > 1000000)) && : >"$PH/events.jsonl"
+    find "$PH/clips" -type f -mmin +5 -delete 2>/dev/null
+    rm -f "$PH"/approve.*
+    # shellcheck disable=SC2016 # jq, not bash
+    phone_send "$(jqs '{type:"heard", text:$s[0]}' -- "$text")"
+  fi
   window=$(cat "$DATA/ctx.window" 2>/dev/null)
   [[ $window =~ ^[1-9][0-9]{0,11}$ ]] || window=""
   ev turn
   [[ -z $SID || $agent != claude ]] && ev "ctx 0"
   speech_warm
   REACTION=$(reaction thinking)
-  set_state thinking "$text"
+  set_state thinking "$text" thinking
   live_decide "$text" "" ""
 
   cd "$WORKDIR" 2>/dev/null || cd "$HOME"
@@ -490,9 +693,9 @@ cmd_turn() {
       ;;
     mode) log "permission mode $rest" ;;
     tool)
-      IFS=$'\t' read -r tcat id activity <<<"$rest"
+      IFS=$'\t' read -r tcat id activity status <<<"$rest"
       REACTION=$(cat "$RT/live.json" 2>/dev/null || reaction "tool.$tcat")
-      set_state tool "$activity"
+      set_state tool "$activity" "$status"
       ev "tool $id $tcat"
       cue --beeps 1
       live_decide "$text" "$activity" "$words"
@@ -546,10 +749,11 @@ cmd_turn() {
   stop_live
 
   [[ -n $failed ]] && say="Sorry, something went wrong."
-  [[ -x $PY ]] && jq -cn --arg user "$text" --arg say "$say" --arg reply "${result:0:900}" --arg mood "$mood" \
-    --argjson failed "$([[ -n $failed ]] && echo true || echo false)" --argjson history "$(recent_history "$SID")" \
-    --argjson speech "$(cat "$RT/speech.json" 2>/dev/null || echo null)" \
-    '{phase:"done", user:$user, say:$say, reply:$reply, mood:$mood, failed:$failed, history:$history, speech:$speech, deadline:4}' |
+  # shellcheck disable=SC2016 # jq, not bash
+  [[ -x $PY ]] && jqs '{phase:"done", user:$s[0], say:$s[1], reply:$s[2], mood:$s[3], failed:($s[4] == "true"),
+    history:($s[5] | fromjson), speech:($s[6] | fromjson), deadline:4}' -- "$text" "$say" "${result:0:900}" "$mood" \
+    "$([[ -n $failed ]] && echo true || echo false)" "$(recent_history "$SID")" \
+    "$(cat "$RT/speech.json" 2>/dev/null || echo null)" |
     "$PY" -I "$DECIDE" >"$RT/final.out" 2>>"$RT/glitch.log" 8>&- 9>&- &
   local decide_pid=$!
   speech_render "$say"
@@ -568,24 +772,33 @@ cmd_turn() {
   fi
   ((denied > 0)) && log "permission denials: $denied"
 
-  notify "$summary" "$body" --exec "$0" open &
+  if [[ $PORTAL == phone ]]; then
+    # shellcheck disable=SC2016 # jq, not bash
+    phone_send "$(jqs '{type:"reply", summary:$s[0], body:$s[1][0:4000], speech:($s[2] == "true")}' \
+      -- "$say" "${failed:-$result}" "$([[ -s $RT/say.wav ]] && echo true || echo false)")"
+  else
+    notify "$summary" "$body" --exec "$0" open &
+  fi
   set_state "$state" "$say"
   (
     timeout 5 tail -s 0.05 --pid="$decide_pid" -f /dev/null 2>/dev/null
     fin=$(cat "$RT/final.out" 2>/dev/null)
-    [[ -n $fin && $state == speaking && ! -e $RT/recording ]] || exit 0
-    [[ $(jq -r .state "$RT/state.json" 2>/dev/null) == speaking ]] || exit 0
+    [[ -n $fin && $state == speaking ]] && ! recording || exit 0
+    [[ $(jq -r .state "$(state_file)" 2>/dev/null) == speaking ]] || exit 0
     REACTION=$fin set_state speaking "final reaction"
   ) 8>&- 9>&- &
   local look_pid=$!
-  if [[ ! -e $RT/recording ]]; then
+  if ! recording; then
     contour=arch
     [[ $say == *\? ]] && contour=rise
     [[ -n $failed || $mood == sorry || $mood == concerned ]] && contour=fall
+    CLIP=""
     cue --contour "$contour"
-    sleep 0.4
-    [[ -s $RT/say.env ]] && ev "say $(<"$RT/say.env")"
-    if play "$RT/say.wav" && [[ $state == speaking && -s $RT/say.wav ]]; then
+    if [[ $PORTAL == desk ]]; then
+      sleep "$lead"
+      [[ -s $RT/say.env ]] && ev "say $(<"$RT/say.env")"
+    fi
+    if play "$RT/say.wav" "$CLIP" "$lead" && [[ $state == speaking && -s $RT/say.wav ]]; then
       REACTION='{"voice":"bubble","energy":0.4,"mood":"calm"}' cue --notes 360
     fi
   fi
@@ -597,9 +810,10 @@ cmd_turn() {
     REACTION=$fin
   fi
   [[ $state == speaking ]] && state=done
-  [[ -e $RT/recording ]] || set_state "$state" "$say"
-  jq -cn --arg sid "$SID" --arg user "$text" --arg say "$say" --argjson reaction "${REACTION:-null}" \
-    '{sid:$sid, user:$user, say:$say, reaction:($reaction | {mood, palette, pattern, motion})}' >>"$RT/history.jsonl" 2>/dev/null
+  recording || set_state "$state" "$say"
+  # shellcheck disable=SC2016 # jq, not bash
+  jqs '{sid:$s[0], user:$s[1], say:$s[2], reaction:($reaction | {mood, palette, pattern, motion})}' --argjson reaction "${REACTION:-null}" \
+    -- "$SID" "$text" "$say" >>"$RT/history.jsonl" 2>/dev/null
   tail -n "$((HISTORY_TURNS + 5))" "$RT/history.jsonl" >"$RT/history.tmp" 2>/dev/null && mv "$RT/history.tmp" "$RT/history.jsonl"
   wait
   expire_later
@@ -616,45 +830,126 @@ cmd_open() {
   fi
 }
 
+# shellcheck disable=SC2016 # jq, not bash
+APPROVE_JQ='
+def qk: if test("^[A-Za-z0-9_][A-Za-z0-9_.@$/-]*$") then . else tojson end;
+def one: if type == "string" and test("^[^\\s\"\\[{|#-]|^-[^\\s]") and (test("\n|\\s$") | not)
+  and (test("^(true|false|null|-?[0-9.][0-9.eE+-]*)$") | not) then . else tojson end;
+def doc:
+  def block($h): [$h + " |"] + (split("\n") | map("  " + .));
+  def item($h): if type == "string" and test("\n") then block($h)
+    elif (type == "object" or type == "array") and length > 0 then [$h] + (doc | map("  " + .))
+    else [$h + " " + one] end;
+  if type == "object" and length > 0 then [keys[] as $k | .[$k] | item($k | qk + ":")[]]
+  elif type == "array" and length > 0 then [.[] | item("-")[]]
+  elif type == "string" and test("\n") then block("") | .[0] = "|"
+  else [one] end;
+def rest($laid): delpaths([$laid[] | [.]]) | if length == 0 then "" else doc | join("\n") end;
+def head($laid): rest($laid) | if . == "" then "" else "\n" + . end;
+def tail($laid): rest($laid) | if . == "" then "" else "\n\n" + . end;
+def swap: "--- replace\n" + .old_string + "\n+++ with\n" + .new_string;
+def laid($n):
+  def s($k): .[$k] | type == "string";
+  if type != "object" then null
+  elif ($n | test("^(Bash|Shell)$")) and s("command") then
+    {body: (.command + tail(["command", "description"])), plain: (keys - ["command", "description"] == [])}
+  elif $n == "Write" and s("file_path") and s("content") then
+    {body: (.file_path + head(["file_path", "content"]) + "\n\n" + .content)}
+  elif $n == "Edit" and s("file_path") and s("old_string") and s("new_string") then
+    {body: (.file_path + head(["file_path", "old_string", "new_string"]) + "\n" + swap)}
+  elif $n == "MultiEdit" and s("file_path") and (.edits | type == "array" and length > 0
+      and all(type == "object" and (.old_string | type == "string") and (.new_string | type == "string"))) then
+    {body: (.file_path + head(["file_path", "edits"])
+      + (.edits | map("\n" + (rest(["old_string", "new_string"]) | if . == "" then "" else . + "\n" end) + swap) | join("\n")))}
+  elif $n == "NotebookEdit" and s("notebook_path") and s("new_source") then
+    {body: (.notebook_path + head(["notebook_path", "new_source"]) + "\n\n" + .new_source)}
+  elif $n == "WebFetch" and s("url") and s("prompt") then {body: (.url + head(["url", "prompt"]) + "\n\n" + .prompt)}
+  elif $n == "WebSearch" and s("query") then {body: (.query + tail(["query"]))}
+  else null end;
+.tool_name as $n | ($n + ": ") as $p | .tool_input as $i
+| ($i | laid($n)) as $l
+| (if $l then $p + $l.body else $n + ":\n" + ($i | doc | join("\n")) end | vis) as $all | $all[0:20000] as $kept
+| (try ($p + ($i.command // $i.file_path // $i.url // $i.description // ($i | tostring) | tostring
+    | split("\n") | map(select(test("\\S"))) | first // "" | .[0:110]) | vis) catch null) as $short
+| {tool: (if $short then $n else "" end), label: $kept, short: ($short // ""), cut: (($all | length) - ($kept | length))}
+| .oneline = ($l.plain == true and .cut == 0 and .label == .short and (.label | length) <= 40
+    and ($i.command | vis == . and test("\\S") and (test("[\n\t]|\\s\\s|^\\s|\\s$") | not)))
+'
+
 cmd_approve() {
-  local in label ask pick before
+  local in tool short cut shown ask pick before
   in=$(cat)
-  label=$(jq -r '.tool_name + ": " + ((.tool_input.command // .tool_input.file_path // .tool_input.url // .tool_input.description // (.tool_input | tostring)) | tostring | split("\n")[0] | .[0:110])' <<<"$in" 2>/dev/null)
-  case $(jq -r .tool_name <<<"$in" 2>/dev/null) in
-  Bash) ask="Need you: okay to run that command?" ;;
-  Edit | MultiEdit | Write | NotebookEdit) ask="Need you: okay to change that file?" ;;
-  WebFetch | WebSearch) ask="Need you: okay to go online for that?" ;;
-  *) ask="Need you: okay to do that?" ;;
+  { IFS= read -r tool; IFS= read -r short; IFS= read -r cut; IFS= read -r shown; } < <(jq -r "$JQ_DEFS$APPROVE_JQ"'
+    | .tool, .short, .cut, (del(.tool) | tojson)' <<<"$in" 2>/dev/null)
+  case $tool in
+  Bash) ask="Okay to run that command?" ;;
+  Edit | MultiEdit | Write | NotebookEdit) ask="Okay to change that file?" ;;
+  WebFetch | WebSearch) ask="Okay to go online for that?" ;;
+  *) ask="Okay to do that?" ;;
   esac
-  log "approve? $label"
-  before=$(cat "$RT/state.json" 2>/dev/null)
+  log "approve? $short"
+  before=$(cat "$(state_file)" 2>/dev/null)
   REACTION=$(reaction needs_you)
-  set_state needs_you "$label"
+  set_state needs_you "$short"
   cue
-  (speech_warm ask && speech_render "$ask" && play "$RT/ask.wav") </dev/null >/dev/null 2>&1 &
-  pick=$(timeout 60 omarchy-menu-select "glitch wants to · $label" "󰄬	Allow once" "󰅖	Deny" -- --width 760 2>/dev/null) || pick=""
-  [[ -z $pick ]] && omarchy-menu close >/dev/null 2>&1
-  hush
+  APPROVE_ID=${EPOCHREALTIME/./}$$
+  (speech_warm "ask.$APPROVE_ID" && speech_render "Need you: ${ask,}" && play "$SPEAK_SLOT.wav"; rm -f "$SPEAK_SLOT".*) </dev/null >/dev/null 2>&1 &
+  if [[ $PORTAL == phone ]]; then
+    pick=$(phone_approve "$shown" "$ask" "${cut:-1}")
+  else
+    pick=$(timeout 60 omarchy-menu-select "glitch wants to · $short" "󰄬	Allow once" "󰅖	Deny" -- --width 760 2>/dev/null) || pick=""
+    [[ -z $pick ]] && omarchy-menu close >/dev/null 2>&1
+    hush
+  fi
   log "approve: ${pick:-no answer}"
   if [[ -n $before ]]; then
-    REACTION=$(jq -c .reaction <<<"$before") set_state "$(jq -r .state <<<"$before")" "approved: ${pick:-none}"
+    REACTION=$(jq -c .reaction <<<"$before") set_state "$(jq -r .state <<<"$before")" "approved: ${pick:-none}" "$(jq -r '.status // ""' <<<"$before")"
   fi
   if [[ $pick == "Allow once" ]]; then
     jq -cn '{hookSpecificOutput: {hookEventName: "PermissionRequest", decision: {behavior: "allow"}}}'
   else
-    local why="The user didn't approve it."
-    [[ -n $pick ]] && why="The user chose Deny."
-    jq -cn --arg m "$why Don't retry it; say what you needed, starting the SAY line with Need you." \
-      '{hookSpecificOutput: {hookEventName: "PermissionRequest", decision: {behavior: "deny", message: $m}}}'
+    local why="The user didn't approve it." next="Don't retry it; say what you needed, starting the SAY line with Need you."
+    case $pick in
+    Deny) why="The user chose Deny." ;;
+    Refused) why="The user tried to allow it, but it was refused." ;;
+    Unsent) why="It couldn't be shown on the user's phone, so it was denied." ;;
+    esac
+    [[ $PORTAL == phone && $pick != Unsent && $cut != 0 ]] &&
+      next="It was too long to review on the phone, so it can't be allowed there: don't retry it as is; shorten it or split it into smaller steps."
+    jq -cn --arg m "$why $next" '{hookSpecificOutput: {hookEventName: "PermissionRequest", decision: {behavior: "deny", message: $m}}}'
   fi
 }
 
+# shown goes in on stdin: a label can pass Linux's 128 KiB limit on one argument.
+phone_approve() {
+  local answer="" end event
+  clock
+  end=$((CLOCK + PORTAL_APPROVE_TIMEOUT * 100))
+  if ! event=$(jq -c --arg id "$APPROVE_ID" --arg ask "$2" --argjson t "$PORTAL_APPROVE_TIMEOUT" --argjson since "$CLOCK" \
+    'if type == "object" and (.label | type) == "string" then . else error("no label") end
+    | {type:"approve", id:$id, ask:$ask} + . + {timeout:$t, since:($since / 100)}' <<<"$1" 2>>"$RT/glitch.log") ||
+    ! phone_send "$event"; then
+    log "approve: couldn't send the approval to the phone"
+    echo Unsent
+    return
+  fi
+  while [[ ! -s $PH/approve.$APPROVE_ID ]] && clock && ((CLOCK <= end)); do sleep 0.2; done
+  answer=$(cat "$PH/approve.$APPROVE_ID" 2>/dev/null)
+  rm -f "$PH/approve.$APPROVE_ID"
+  phone_send "$(jq -cn --arg id "$APPROVE_ID" --arg a "${answer:-none}" '{type:"approved", id:$id, answer:$a}')"
+  case "$answer" in
+  allow) [[ $3 == 0 ]] && echo "Allow once" || echo "Refused" ;;
+  deny) echo "Deny" ;;
+  esac
+}
+
 cmd_cancel() {
-  local pid
-  if [[ -e $RT/recording ]]; then
+  local pid owner
+  if [[ $PORTAL == desk && -e $RT/recording ]]; then
     voxtype record cancel >/dev/null 2>&1
     rm -f "$RT/recording" "$RT/force-new"
   fi
+  owner=$(turn_portal)
   hush
   pid=$(cat "$RT/turn.pid" 2>/dev/null)
   if [[ -n $pid ]] && grep -qs "_turn" "/proc/$pid/cmdline" &&
@@ -664,9 +959,15 @@ cmd_cancel() {
     for _ in 1 2 3 4 5 6; do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
     pkill -TERM -s "$pid" 2>/dev/null
     rm -f "$RT/cancel.$pid"
-    ev rest
+    exec 9>"$RT/turn.lock"
+    flock -w 2 9 || return 0
+    PORTAL=${owner:-$PORTAL} ev rest
   fi
-  REACTION=$(reaction mood.unsure) set_state idle "cancelled"
+  if [[ -n $owner && $owner != "$PORTAL" ]]; then
+    PORTAL=$owner hush
+    REACTION=$(reaction mood.unsure) PORTAL=$owner set_state idle cancelled cancelled
+  fi
+  REACTION=$(reaction mood.unsure) set_state idle cancelled cancelled
 }
 
 # glitch-remote keeps every session it spawned (~650 MB with its MCP servers, and
@@ -707,24 +1008,135 @@ cmd_reap() {
   systemctl --user restart glitch-remote.service
 }
 
+say_aside() {
+  speech_warm aside
+  speech_render "$*"
+  play "$RT/aside.wav"
+}
+
+cmd_pair() {
+  local PORTAL=desk code
+  [[ $SPEAK == 1 && -x $PY && -f $VOICE ]] || { echo "glitch pair: needs speech (SPEAK=1 and a Piper voice) to say the code" >&2; return 1; }
+  code=$(printf '%06d' $(($(od -An -N4 -tu4 /dev/urandom) % 1000000)))
+  mkdir -p "$PH"
+  write_atomic "$PH/pair" "$(jq -cn --arg h "$(printf '%s' "$code" | sha256sum | cut -d' ' -f1)" \
+    --argjson e $((EPOCHSECONDS + 120)) '{hash:$h, expires:$e, tries:0}')"
+  log "pairing open for 2 minutes"
+  say_aside "Your phone code is ${code:0:1} ${code:1:1} ${code:2:1}, ${code:3:1} ${code:4:1} ${code:5:1}."
+}
+
+cmd_unpair() {
+  local PORTAL=desk
+  mkdir -p "$DATA/portal" && chmod 700 "$DATA/portal"
+  (flock 9 && rm -f "$DATA/portal/devices" "$PH/pair") 9>"$DATA/portal/devices.lock"
+  log "phones unpaired"
+  say_aside "Done, your phone is unpaired."
+}
+
+# Chrome on Android ignores name constraints on user-installed roots, so the CA signs
+# once and its key is destroyed. Chrome caps lifetimes only under publicly trusted roots,
+# so neither certificate expires (RFC 5280's 99991231235959Z). notBefore is a day back
+# for a phone clock that runs slow. Android installs a "CA certificate" only with CA:TRUE.
+cmd_cert() {
+  local ca="$DATA/portal/glitch-ca.crt" from to=99991231235959Z fp d
+  if [[ ! $PORTAL_ADDR =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+    echo "glitch cert: set PORTAL_ADDR (this machine's LAN address, e.g. 192.168.1.12) in $USER_CONF/glitch.conf" >&2
+    return 1
+  fi
+  if [[ $1 != --renew && (-e $PORTAL_CERT || -e $ca) ]]; then
+    echo "glitch cert: the phone already trusts $ca; a new one stops that until it's installed again." >&2
+    echo "  Make a new one with: glitch cert --renew" >&2
+    return 1
+  fi
+  # On tmpfs, so the CA key never reaches the disk: shred can't erase a file on btrfs.
+  # Not local, because the EXIT trap runs after this function returns.
+  tmp=$(mktemp -d -p "$RT") || return 1
+  trap 'rm -rf "$tmp"' EXIT
+  trap 'exit 130' INT TERM
+  from=$(date -u -d '-1 day' +%Y%m%d%H%M%SZ)
+  if ! (
+    set -e
+    cd "$tmp"
+    printf '%s\n' '[req]' 'distinguished_name = dn' '[dn]' \
+      '[ca]' 'basicConstraints = critical, CA:TRUE, pathlen:0' 'keyUsage = critical, keyCertSign' 'subjectKeyIdentifier = hash' \
+      '[leaf]' 'basicConstraints = critical, CA:FALSE' 'keyUsage = critical, digitalSignature' 'extendedKeyUsage = serverAuth' \
+      "subjectAltName = IP:$PORTAL_ADDR" 'subjectKeyIdentifier = hash' 'authorityKeyIdentifier = keyid' >x509.cnf
+    openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out ca.key
+    openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out key.pem
+    openssl req -x509 -new -config x509.cnf -extensions ca -key ca.key -subj "/CN=glitch portal $PORTAL_ADDR (key destroyed)" \
+      -sha256 -not_before "$from" -not_after "$to" -out ca.pem
+    openssl req -new -config x509.cnf -key key.pem -subj "/CN=$PORTAL_ADDR" -out leaf.csr
+    openssl x509 -req -in leaf.csr -CA ca.pem -CAkey ca.key -extfile x509.cnf -extensions leaf \
+      -sha256 -not_before "$from" -not_after "$to" -out cert.pem 2>/dev/null
+    shred -u ca.key
+    openssl verify -x509_strict -purpose sslserver -CAfile ca.pem cert.pem >/dev/null
+    openssl x509 -in ca.pem -outform DER -out ca.crt
+  ); then
+    rm -rf "$tmp"
+    echo "glitch cert: openssl failed" >&2
+    return 1
+  fi
+  for d in "$DATA/portal" "$(dirname "$PORTAL_CERT")" "$(dirname "$PORTAL_KEY")"; do mkdir -p "$d" && chmod 700 "$d"; done
+  install -m 600 "$tmp/key.pem" "$PORTAL_KEY.new" && mv "$PORTAL_KEY.new" "$PORTAL_KEY" &&
+    install -m 644 "$tmp/cert.pem" "$PORTAL_CERT.new" && mv "$PORTAL_CERT.new" "$PORTAL_CERT" &&
+    install -m 644 "$tmp/ca.crt" "$ca.new" && mv "$ca.new" "$ca"
+  d=$?
+  rm -rf "$tmp"
+  ((d == 0)) || { echo "glitch cert: couldn't write the certificate" >&2; return 1; }
+  fp=$(openssl x509 -inform DER -in "$ca" -noout -fingerprint -sha256 | cut -d= -f2)
+  log "portal certificate made for $PORTAL_ADDR (CA $fp)"
+  echo "CA file for the phone: $ca"
+  echo "SHA-256: $fp"
+  echo "On the phone: Settings > Security > Encryption & credentials > Install a certificate > CA certificate,"
+  echo "pick this file and check the fingerprint. It vouches only for $PORTAL_ADDR, and its key is gone."
+  [[ $1 == --renew ]] && echo "The portal serves the new certificate once restarted: systemctl --user restart glitch-portal"
+  return 0
+}
+
+# 78 is EX_CONFIG, which glitch-portal.service doesn't restart on.
+cmd_portal() {
+  local PORTAL=desk addr=$PORTAL_ADDR args c py=python3
+  if [[ ${GLITCH_PORTAL_PLAIN:-} == 1 ]]; then
+    addr=127.0.0.1 args=(--plain)
+  elif [[ -z $addr ]]; then
+    echo "glitch portal: set PORTAL_ADDR (this machine's LAN address) in $USER_CONF/glitch.conf" >&2
+    exit 78
+  elif [[ ! -f $PORTAL_CERT || ! -f $PORTAL_KEY ]]; then
+    echo "glitch portal: no certificate at $PORTAL_CERT and key at $PORTAL_KEY" >&2
+    exit 78
+  else
+    args=(--cert "$PORTAL_CERT" --key "$PORTAL_KEY")
+  fi
+  mkdir -p "$PH/sounds" "$PH/clips"
+  for c in "${CHIMES[@]}"; do chime "$c" --out "$PH/sounds/$c.wav"; done
+  wait
+  [[ -x $PY ]] && py=$PY
+  exec "$py" -I "$GLITCH_HOME/libexec/portal" "${args[@]}" --addr "$addr" --port "$PORTAL_PORT" --rt "$RT" --data "$DATA" \
+    --glitch "$GLITCH_HOME/bin/glitch" --web "$GLITCH_HOME/web" --plugin "$GLITCH_HOME/plugin" --max-seconds "$RECORD_LIMIT"
+}
+
 case "${1:-}" in
 toggle) shift; cmd_toggle "$@" ;;
 stop) exec 8>"$RT/key.lock"; flock 8; cmd_stop ;;
-_turn) cmd_turn "$2" "${3:-false}" ;;
+_turn) cmd_turn "$2" "${3:-false}" "${4:-}" ;;
+_heard) heard "$2" false "$(speech_stats "${3:-0}" "$2")" ;;
+_reactions) reactions . ;;
+pair) cmd_pair ;;
+unpair) cmd_unpair ;;
+portal) cmd_portal ;;
+cert) cmd_cert "${2:-}" ;;
 _live) cmd_live ;;
 _expire) close_card ;;
 _approve) cmd_approve ;;
 _reap) cmd_reap ;;
 open) cmd_open ;;
-new) forget_session; REACTION=$(reaction mood.calm) set_state done "fresh session" ;;
+new) setsid "$0" _turn "" true </dev/null >/dev/null 2>&1 & ;;
 cancel) cmd_cancel ;;
 hush) hush ;;
 say)
   shift
-  speech_warm aside
-  speech_render "$*"
-  play "$RT/aside.wav"
+  say_aside "$@"
   ;;
 state) cat "$RT/state.json" 2>/dev/null ;;
-*) sed -n '3,13p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+*) sed -n '3,17p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

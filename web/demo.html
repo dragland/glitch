@@ -1,0 +1,81 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>glitch orb demo</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0d0e12; color: #8a8f98; font: 13px ui-monospace, monospace }
+  canvas { display: block; width: min(100vw, 100vh); height: min(100vw, 100vh); margin: 0 auto }
+  #now { position: fixed; left: 12px; top: 10px }
+</style>
+<canvas id="orb"></canvas>
+<div id="now"></div>
+<script type="module">
+import { createOrbView } from "./orb.js"
+
+const look = (palette, pattern, motion, mood, energy) => ({ palette, pattern, motion, mood, energy })
+const set = (state, reaction) => ["set", JSON.stringify({ state, reaction })]
+const envelope = Array.from({ length: 120 }, (_, i) =>
+  Math.round(99 * Math.abs(Math.sin(i * 0.31)) * (0.4 + 0.6 * Math.abs(Math.sin(i * 0.07))))).join(" ")
+
+const script = [
+  [0.2, ...set("listening", look("electric", "rings", "breathe", "curious", 0.5))],
+  [0.3, "mic", "talk"],
+  [1.9, "mic", "off"],
+  [2.0, ...set("transcribing", look("electric", "rings", "breathe", "curious", 0.5))],
+  [2.6, "event", "turn"],
+  [2.6, ...set("thinking", look("ocean", "waves", "orbit", "focused", 0.4))],
+  [2.6, "event", "ctx 0.3"],
+  [2.7, "event", "tok-stream"],
+  [4.2, ...set("tool", look("citrus", "checker", "wobble", "focused", 0.5))],
+  [4.2, "event", "tool m1 make"],
+  [4.6, "event", "tool m2 make"],
+  [4.9, "event", "end m1"],
+  [4.95, "event", "end m2"],
+  [5.2, ...set("tool", look("ocean", "dots", "orbit", "focused", 0.4))],
+  [5.2, "event", "tool l1 look"],
+  [6.0, "event", "end l1"],
+  [6.3, "event", "tool r1 run"],
+  [6.4, "event", "ctx 0.55"],
+  [7.2, "event", "end r1"],
+  [7.5, ...set("tool", look("candy", "noise", "jitter", "excited", 0.6))],
+  [7.5, "event", "tool d1 delegate"],
+  [7.8, "event", "tool d2 delegate"],
+  [8.1, "event", "tool d3 delegate"],
+  [9.5, "event", "end d1"],
+  [10.2, "event", "end d2"],
+  [10.5, "event", "rest"],
+  [11.0, ...set("speaking", look("sunset", "rings", "bounce", "happy", 0.7))],
+  [11.05, "event", "say 50 " + envelope],
+  [13.0, "event", "hush"],
+  [13.5, ...set("needs_you", look("candy", "stripes", "jitter", "surprised", 0.6))],
+  [15.0, ...set("done", look("mint", "fine", "still", "calm", 0.45))],
+  [16.5, ...set("thinking", look("mono", "dots", "breathe", "focused", 0.3))],
+  [16.5, "event", "turn"],
+  [16.6, "event", "tool x1 run"],
+  [17.4, "event", "rest"],
+  [17.6, ...set("idle", look("mono", "dots", "breathe", "calm", 0.3))],
+  [21.0, "loop"]
+]
+
+let t = 0, next = 0, talking = false, streaming = 0
+const now = document.getElementById("now")
+const orb = await createOrbView(document.getElementById("orb"), {
+  onBeforeStep() {
+    if (talking) orb.mic((0.15 + 0.75 * Math.abs(Math.sin(t * 14))) ** 3)
+  }
+})
+orb.start()
+
+setInterval(() => {
+  t += 0.05
+  if (streaming > 0) { streaming--; orb.event("tok " + (20 + Math.round(Math.random() * 60))) }
+  while (next < script.length && script[next][0] <= t) {
+    const [, kind, arg] = script[next++]
+    if (kind === "loop") { t = 0; next = 0; break }
+    if (kind === "set") { orb.set(arg); now.textContent = JSON.parse(arg).state }
+    else if (kind === "mic") talking = arg === "talk"
+    else if (arg === "tok-stream") streaming = 30
+    else orb.event(arg)
+  }
+}, 50)
+</script>

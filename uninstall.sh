@@ -39,6 +39,9 @@ unlink_if_link "$CONFIG/systemd/user/ydotool.service.d/glitch.conf"
 rmdir "$CONFIG/systemd/user/ydotool.service.d" 2>/dev/null
 unlink_if_link "$HOME/.claude/rules/glitch-desktop.md"
 
+systemctl --user disable --now glitch-portal.service >/dev/null 2>&1
+unlink_if_link "$CONFIG/systemd/user/glitch-portal.service"
+
 systemctl --user disable glitch-remote-reap.timer glitch-remote.service >/dev/null 2>&1
 for u in glitch-remote.service glitch-remote-reap.service glitch-remote-reap.timer; do
   unlink_if_link "$CONFIG/systemd/user/$u"
