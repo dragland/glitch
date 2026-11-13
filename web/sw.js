@@ -1,25 +1,16 @@
-// The phone portal's service worker: keeps the app shell for when home is out
-// of reach, and turns payload-less pushes into notifications (libexec/portal's
-// docstring has the push side).
-//
-// The shell is saved as whole sets, one cache each ("shell-<ms>"), and a page loads
-// every file from the set its navigation got; saved files carry X-Glitch-Set: <name>.
-// A page's message "refresh" refreshes the saved set and is answered {set: <newest>}.
-// Cache "handoff" holds /allow {id, at}: Allow once pressed on a notification, for the page to send once
-// it's open (a notification action works on a locked phone; opening the app doesn't). Allow once is offered
-// only when the approval's oneline is set: bin/glitch sets it for a plain Bash command of at most 40
-// characters, which a collapsed notification's single line shows whole. The page checks oneline again;
-// neither has a rule of its own.
+// Page contract. Each cache "shell-<ms>" is one whole set of FILES, and a page loads every
+// file from the set its navigation got; saved files carry X-Glitch-Set: <set>. The page's
+// message "refresh" refreshes the saved set and is answered {set: <newest>}. Cache "handoff"
+// holds /allow {id, at}: Allow once pressed on a notification, for the page to send once it's
+// open and unlocked, because a notification action works on a locked phone.
 const FILES = ["/", "/app.js", "/orb.js", "/plugin/orb.mjs", "/plugin/orb.glsl", "/sounds/start.wav", "/sounds/stop.wav",
   "/sounds/unsure.wav", "/icon-192.png", "/icon-512.png", "/icon-mono-192.png", "/manifest.webmanifest", "/api/reactions"]
 const SET = "shell-", HANDOFF = "handoff", TAG = "glitch"
-// Away without Tailscale, the home address mostly hangs rather than failing, so a slow
-// answer counts as none and the saved set opens.
+// Away without Tailscale, the home address mostly hangs rather than failing.
 const WAIT_MS = 1800, GIVE_UP_MS = 20000, FRESH_MS = 5000
 const pins = new Map()
 let running = null, refreshed = 0
 
-// The server redirects unpaired requests to /pair or answers 401: only a plain 200 is a shell.
 const good = r => r.ok && r.type === "basic" && !r.redirected
 function same(a, b) {
   const x = new Uint8Array(a), y = new Uint8Array(b)
@@ -28,7 +19,6 @@ function same(a, b) {
 const newest = async () => (await caches.keys()).filter(n => n.startsWith(SET)).sort().at(-1) || null
 const saved = (name, path) => name ? caches.match(path, { cacheName: name }) : Promise.resolve(undefined)
 
-// Resolves to the network's "/" when the set couldn't be fetched whole, else null.
 function refresh() {
   if (Date.now() - refreshed < FRESH_MS) return Promise.resolve(null)
   return running ||= (async () => {
@@ -87,13 +77,11 @@ self.addEventListener("message", e => {
   if (e.data === "refresh") e.waitUntil(refresh().catch(() => {}).then(newest).then(set => e.source.postMessage({ set })))
 })
 
-// --- notifications ---
-
 // Chrome subscriptions are userVisibleOnly: a push must show a notification
 // unless a tab of the site is visible ("Sites with a currently visible tab don't
 // need to show notifications", chrome/browser/push_messaging/
-// push_messaging_notification_manager.cc), and it forgives an occasional miss.
-// One of the site's notifications still showing counts as shown.
+// push_messaging_notification_manager.cc). Chrome forgives an occasional miss, and
+// one of the site's notifications still showing counts as shown.
 self.addEventListener("push", e => e.waitUntil(woke()))
 
 async function woke(answered) {
@@ -104,10 +92,9 @@ async function woke(answered) {
     const r = await fetch("/api/notice", { cache: "no-store", signal: AbortSignal.timeout(5000) })
     if (r.ok) n = await r.json()
   } catch {}
-  // A push without a payload can't say which it was, so out of reach it's one text for both.
   if (!n) return show("glitch", "Something's waiting at home.")
   const a = n.approve?.[0]
-  if (a) return show("glitch needs you", a.short ?? brief(a.label || ""), {
+  if (a) return show("glitch needs you", a.short || brief(a.label || ""), {
     data: { id: a.id }, requireInteraction: true,
     actions: [a.oneline ? { action: "allow", title: "Allow once" } : { action: "open", title: "Open" }, { action: "deny", title: "Deny" }]
   })
@@ -117,7 +104,6 @@ async function woke(answered) {
   if (answered) for (const x of left) x.close()
 }
 
-// Text only, for an approval from before short existed; what it offers depends on oneline alone.
 function brief(label, max = 120) {
   const first = label.split("\n")[0], chars = Array.from(first)
   return chars.length > max || first !== label ? chars.slice(0, max - 1).join("").trimEnd() + "…" : label

@@ -1,6 +1,5 @@
-// The orb on a canvas: plugin/orb.mjs's logic drawn with plugin/orb.glsl in
-// WebGL2, the same pair the desktop plugin runs. The imports resolve to
-// /plugin/orb.mjs and /plugin/orb.glsl whether web/ is served at / or /web/.
+// "../plugin/" resolves to /plugin/ whether web/ is served at / or at /web/: URL
+// resolution stops at the root.
 import { createOrb, stage, aa } from "../plugin/orb.mjs"
 
 const VERTEX = `#version 300 es
@@ -75,6 +74,7 @@ export async function createOrbView(canvas, opts = {}) {
 
   function render() {
     const W = canvas.clientWidth, H = canvas.clientHeight
+    // clientWidth is 0 while the canvas isn't rendered (display: none, detached).
     if (lost || !W || !H) return
     const dpr = opts.dpr || window.devicePixelRatio || 1
     const pw = Math.round(W * dpr), ph = Math.round(H * dpr)
@@ -130,6 +130,7 @@ export async function createOrbView(canvas, opts = {}) {
     if (!frame.visible) { cancelAnimationFrame(raf); raf = 0 }
   }
 
+  // A browser may drop a WebGL context at any time; without preventDefault it never restores it.
   canvas.addEventListener("webglcontextlost", e => {
     e.preventDefault()
     lost = true

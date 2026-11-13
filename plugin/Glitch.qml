@@ -7,15 +7,6 @@ import Quickshell.Wayland
 import qs.Commons
 import "orb.mjs" as Orb
 
-// The face of glitch (bin/glitch). Its palettes, patterns, motions and beeps
-// come from the Beep Jev creature (beepjev.replit.app, Yohei Nakajima); the
-// shader (orb.glsl) draws them on a globe-edged disc whose pattern is centred
-// on a gaze point, so the eye is the pattern.
-//
-// This file only hosts the orb: orb.mjs holds its logic and lists its inputs,
-// shared with the web orb (web/orb.js). Here, the state comes over IPC, the
-// live signals are tailed from $XDG_RUNTIME_DIR/glitch/orb.events, and the mic
-// level while listening is read from PipeWire.
 Item {
   id: root
 
@@ -82,7 +73,7 @@ Item {
     onTriggered: if (!hyprSock.connected) hyprSock.connected = true
   }
 
-  // Frames stop while the monitor sleeps; this wakes the core for its deadlines.
+  // FrameAnimation stops while the monitor sleeps, so a timer wakes the core for its deadlines.
   readonly property real wakeAt: f.wakeAt
   onWakeAtChanged: {
     waker.stop()
