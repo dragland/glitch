@@ -303,6 +303,13 @@ else connect()
 
 addEventListener("online", () => { if (offline || !es) probe() })
 
+// --- install: Chrome only raises its own prompt from a tap ---
+
+let installer = null
+addEventListener("beforeinstallprompt", e => { e.preventDefault(); installer = e; $("install").hidden = false })
+addEventListener("appinstalled", () => { $("install").hidden = true })
+$("install").addEventListener("click", () => { $("install").hidden = true; installer?.prompt() })
+
 // --- notifications ---
 
 const canOffer = () => "PushManager" in window && !!navigator.serviceWorker?.controller &&
