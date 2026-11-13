@@ -94,7 +94,7 @@ clip_sent() {
      delay:(if $with == "" then 0 else $lead | tonumber * 1000 | round end), approve:($approve | opt)}')"
 }
 
-# A live signal for the orb (listed at the top of plugin/Glitch.qml). A file the
+# A live signal for the orb (listed at the top of plugin/orb.mjs). A file the
 # orb tails, because IPC costs a process per call.
 ev() {
   if [[ $PORTAL == phone ]]; then

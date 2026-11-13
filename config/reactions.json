@@ -1,5 +1,5 @@
 {
-  "_about": "Fallback reactions (the fields Jev picks in the original) for each orb state, tool category and agent MOOD; the decision model refines them (except mood.clear, which stands as written). Names must match Glitch.qml, glitch.frag and libexec/cue.",
+  "_about": "Fallback reactions (the fields Jev picks in the original) for each orb state, tool category and agent MOOD; the decision model refines them (except mood.clear, which stands as written). Names must match plugin/orb.mjs, plugin/orb.glsl and libexec/cue.",
   "listening": {
     "palette": "electric",
     "pattern": "rings",

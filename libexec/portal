@@ -8,7 +8,7 @@ Phone turns write their channel to RT/phone (bin/glitch, GLITCH_PORTAL=phone):
   events.jsonl   one JSON object per line, relayed as SSE events named by "type"
                  (read from the start at launch, so a restart rebuilds hello):
                    state    {state, reaction, detail}
-                   signal   {line}         an orb.events line (Glitch.qml), minus "say";
+                   signal   {line}         an orb.events line (plugin/orb.mjs), minus "say";
                                            "turn" starts a phone turn, "rest" ends its work
                    heard    {text}         a phone turn started on this text
                    clip     {id, url, kind, ms, env, with, delay, approve}
