@@ -377,7 +377,7 @@ function full(r) {
 const received = a => ({ ...a, got: performance.now() })
 
 function command(label) {
-  return label.split(/(\n(?:[ \t]*\n){3,})/).flatMap((s, i) =>
+  return label.split(/(\n(?:[^\S\n]*\n){3,})/).flatMap((s, i) =>
     i % 2 ? ["\n", make("span", `⏎ ×${s.split("\n").length - 2}`, "dim"), "\n"] : s ? [s] : [])
 }
 
@@ -579,6 +579,7 @@ function connect() {
   on("turn", m => {
     if (turn === "phone" && !m.turn && canOffer()) offering = true
     if (m.turn === "phone" && turn !== "phone") since = Date.now()
+    if (m.turn) note = ""
     turn = m.turn
   })
   on("state", m => {
@@ -775,7 +776,7 @@ function release(e, cancel = false) {
   if (p.discard || performance.now() - p.t < TAP_MS || !rec) {
     rec?.stop()
     if (p.discard && p.begun && !document.hidden) chime("unsure")
-    if (p.begun) { local = null; cleared = false; if (!p.discard) note ||= "hold to talk"; show() }
+    if (p.begun) { local = null; cleared = false; if (!p.discard && turn !== "desk") note ||= "hold to talk"; show() }
     return
   }
   chime("stop")
