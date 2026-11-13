@@ -109,6 +109,7 @@ f.onsubmit = async e => { e.preventDefault();
   const r = await fetch("/api/pair", {method: "POST", headers: {"Content-Type": "application/json"},
     body: JSON.stringify({code: c.value})});
   if (r.ok) location = "/"; else m.textContent = "That code didn't work. Say \\"pair my phone\\" for a new one."; };
+fetch("/api/notice").then(r => { if (r.ok) location.replace("/") });
 </script>"""
 
 
@@ -563,7 +564,7 @@ class Handler(BaseHTTPRequestHandler):
         return None
 
     def cookie(self, key):
-        return {"Set-Cookie": f"{COOKIE}={key}; Path=/; Max-Age={COOKIE_AGE}; HttpOnly; Secure; SameSite=Strict"}
+        return {"Set-Cookie": f"{COOKIE}={key}; Path=/; Max-Age={COOKIE_AGE}; HttpOnly; Secure; SameSite=Lax"}
 
     def body(self, limit):
         n = int(self.headers.get("Content-Length") or 0)
