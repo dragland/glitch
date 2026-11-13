@@ -57,17 +57,31 @@ log() { printf '%(%T)T.%s %s\n' -1 "${EPOCHREALTIME:11:3}" "$*" >>"$RT/glitch.lo
 
 write_atomic() { printf '%s\n' "$2" >"$1.$$" && mv "$1.$$" "$1"; }
 
+# jqs FILTER [OPTION...] -- STRING...: jq -c with $s the array of STRINGs, which go in
+# on stdin: an agent's text can pass the 128 KiB limit on one argument. Bash strings
+# hold no NUL, so NUL separates them.
+jqs() {
+  local f=$1 o=()
+  shift
+  while (($#)) && [[ $1 != -- ]]; do o+=("$1"); shift; done
+  shift
+  printf '%s\0' "$@" | jq -cRs "${o[@]}" "(split(\"\\u0000\") | .[:-1]) as \$s | $f"
+}
+
 # CLOCK: centiseconds since boot, which an NTP step doesn't move (libexec/portal
 # reads the same clock as CLOCK_BOOTTIME).
 clock() { local s; read -r s _ </proc/uptime; CLOCK=$((10#${s/./})); }
 
-# jq shared by every label that reaches a screen. vis makes control and format
-# characters (bidi overrides, zero-width, ESC) visible as \u{…}, so what is
-# shown is what runs. status(name; input) is the phone's status phrase for a tool call.
+# jq shared by every label that reaches a screen. vis makes characters that show
+# as nothing or as a plain space visible as \u{…} (controls, format and bidi,
+# default-ignorables such as variation selectors and Hangul fillers, the blank
+# braille cell, non-ASCII spaces, private-use and unassigned code points), so what
+# is shown is what runs. Combining marks and other scripts stay as they are.
+# status(name; input) is the phone's status phrase for a tool call.
 # shellcheck disable=SC2016 # jq, not bash
 JQ_DEFS='
 def hex: if . < 16 then "0123456789ABCDEF"[.:.+1] else (. / 16 | floor | hex) + (. % 16 | hex) end;
-def vis: gsub("(?<c>(?![\n\t])[\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}])"; "\\u{\(.c | explode[0] | hex)}");
+def vis: gsub("(?<c>(?![\n\t ])[\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}\\p{Zs}\\p{Co}\\p{Cn}\\p{DI}\\x{2800}])"; "\\u{\(.c | explode[0] | hex)}");
 def clip(n): if length > n then .[0:n] + "…" else . end;
 def base: tostring | sub("/+$"; "") | split("/") | last // "";
 def named(d): if . == "" then d else . end;
@@ -138,7 +152,8 @@ set_state() {
 
 orb_set() {
   if [[ $PORTAL == phone ]]; then
-    phone_send "$(jq -c --arg d "${2:-}" '{type:"state"} + . + {detail:$d}' <<<"$1")"
+    # shellcheck disable=SC2016 # jq, not bash
+    phone_send "$(jqs '{type:"state"} + ($s[0] | fromjson) + {detail:$s[1]}' -- "$1" "${2:-}")"
   else
     omarchy-shell -q glitch set "$1" >/dev/null 2>&1 || true
   fi
@@ -146,8 +161,12 @@ orb_set() {
 
 # The phone's channel: one JSON object per line, read by libexec/portal (its
 # docstring lists the types). printf writes a long line in several writes, so
-# writers take the lock to keep lines whole.
-phone_send() { { flock 3 && printf '%s\n' "$1" >&3; } 3>>"$PH/events.jsonl"; }
+# writers take the lock to keep lines whole. An event that couldn't be made is
+# logged, never sent as an empty line.
+phone_send() {
+  [[ -n $1 ]] || { log "phone: ${FUNCNAME[1]} made no event"; return 1; }
+  { flock 3 && printf '%s\n' "$1" >&3; } 3>>"$PH/events.jsonl"
+}
 
 page_online() {
   local pid
@@ -335,10 +354,10 @@ recent_history() {
 
 live_decide() {
   [[ -x $PY ]] || return 0
-  write_atomic "$RT/live.in" "$(jq -cn --arg user "$1" --arg activity "$2" --arg words "$3" \
-    --argjson history "$(recent_history "$SID")" \
-    --argjson speech "$(cat "$RT/speech.json" 2>/dev/null || echo null)" \
-    '{phase:"working", user:$user, activity:$activity, words:$words, history:$history, speech:$speech, deadline:3}')"
+  # shellcheck disable=SC2016 # jq, not bash
+  write_atomic "$RT/live.in" "$(jqs '{phase:"working", user:$s[0], activity:$s[1], words:$s[2],
+    history:($s[3] | fromjson), speech:($s[4] | fromjson), deadline:3}' -- "$1" "$2" "$3" \
+    "$(recent_history "$SID")" "$(cat "$RT/speech.json" 2>/dev/null || echo null)")"
   setsid "$0" _live </dev/null >/dev/null 2>>"$RT/glitch.log" 8>&- 9>&- &
 }
 
@@ -667,7 +686,8 @@ cmd_turn() {
     (($(stat -c %s "$PH/events.jsonl" 2>/dev/null || echo 0) > 1000000)) && : >"$PH/events.jsonl"
     find "$PH/clips" -type f -mmin +5 -delete 2>/dev/null
     rm -f "$PH"/approve.*
-    phone_send "$(jq -cn --arg t "$text" '{type:"heard", text:$t}')"
+    # shellcheck disable=SC2016 # jq, not bash
+    phone_send "$(jqs '{type:"heard", text:$s[0]}' -- "$text")"
   fi
   window=$(cat "$DATA/ctx.window" 2>/dev/null)
   [[ $window =~ ^[1-9][0-9]{0,11}$ ]] || window=""
@@ -748,10 +768,11 @@ cmd_turn() {
   stop_live
 
   [[ -n $failed ]] && say="Sorry, something went wrong."
-  [[ -x $PY ]] && jq -cn --arg user "$text" --arg say "$say" --arg reply "${result:0:900}" --arg mood "$mood" \
-    --argjson failed "$([[ -n $failed ]] && echo true || echo false)" --argjson history "$(recent_history "$SID")" \
-    --argjson speech "$(cat "$RT/speech.json" 2>/dev/null || echo null)" \
-    '{phase:"done", user:$user, say:$say, reply:$reply, mood:$mood, failed:$failed, history:$history, speech:$speech, deadline:4}' |
+  # shellcheck disable=SC2016 # jq, not bash
+  [[ -x $PY ]] && jqs '{phase:"done", user:$s[0], say:$s[1], reply:$s[2], mood:$s[3], failed:($s[4] == "true"),
+    history:($s[5] | fromjson), speech:($s[6] | fromjson), deadline:4}' -- "$text" "$say" "${result:0:900}" "$mood" \
+    "$([[ -n $failed ]] && echo true || echo false)" "$(recent_history "$SID")" \
+    "$(cat "$RT/speech.json" 2>/dev/null || echo null)" |
     "$PY" -I "$DECIDE" >"$RT/final.out" 2>>"$RT/glitch.log" 8>&- 9>&- &
   local decide_pid=$!
   speech_render "$say"
@@ -771,8 +792,9 @@ cmd_turn() {
   ((denied > 0)) && log "permission denials: $denied"
 
   if [[ $PORTAL == phone ]]; then
-    phone_send "$(jq -cn --arg s "$say" --arg b "${failed:-$result}" --argjson speech "$([[ -s $RT/say.wav ]] && echo true || echo false)" \
-      '{type:"reply", summary:$s, body:$b[0:4000], speech:$speech}')"
+    # shellcheck disable=SC2016 # jq, not bash
+    phone_send "$(jqs '{type:"reply", summary:$s[0], body:$s[1][0:4000], speech:($s[2] == "true")}' \
+      -- "$say" "${failed:-$result}" "$([[ -s $RT/say.wav ]] && echo true || echo false)")"
   else
     notify "$summary" "$body" --exec "$0" open &
   fi
@@ -808,8 +830,9 @@ cmd_turn() {
   fi
   [[ $state == speaking ]] && state=done
   recording || set_state "$state" "$say"
-  jq -cn --arg sid "$SID" --arg user "$text" --arg say "$say" --argjson reaction "${REACTION:-null}" \
-    '{sid:$sid, user:$user, say:$say, reaction:($reaction | {mood, palette, pattern, motion})}' >>"$RT/history.jsonl" 2>/dev/null
+  # shellcheck disable=SC2016 # jq, not bash
+  jqs '{sid:$s[0], user:$s[1], say:$s[2], reaction:($reaction | {mood, palette, pattern, motion})}' --argjson reaction "${REACTION:-null}" \
+    -- "$SID" "$text" "$say" >>"$RT/history.jsonl" 2>/dev/null
   tail -n "$((HISTORY_TURNS + 5))" "$RT/history.jsonl" >"$RT/history.tmp" 2>/dev/null && mv "$RT/history.tmp" "$RT/history.jsonl"
   wait
   expire_later
@@ -826,19 +849,68 @@ cmd_open() {
   fi
 }
 
+# The phone's label is the whole tool input, laid out per tool. A layout names the
+# fields it shows; every other field is added as key: value lines (rest), so a new
+# field can't be hidden. The one field left out is Bash's description, the agent's
+# own words about its command. A tool, or an input, that no layout fits is shown
+# whole (doc). oneline, the
+# only label a notification may allow, is a Bash command short and plain enough
+# that the notification's one line shows all of it. The 20000-character cap is on
+# the label as shown, after vis.
+# shellcheck disable=SC2016 # jq, not bash
+APPROVE_JQ='
+def qk: if test("^[A-Za-z0-9_][A-Za-z0-9_.@$/-]*$") then . else tojson end;
+def one: if type == "string" and test("^[^\\s\"\\[{|#-]|^-[^\\s]") and (test("\n|\\s$") | not)
+  and (test("^(true|false|null|-?[0-9.][0-9.eE+-]*)$") | not) then . else tojson end;
+def doc:
+  def block($h): [$h + " |"] + (split("\n") | map("  " + .));
+  def item($h): if type == "string" and test("\n") then block($h)
+    elif (type == "object" or type == "array") and length > 0 then [$h] + (doc | map("  " + .))
+    else [$h + " " + one] end;
+  if type == "object" and length > 0 then [keys[] as $k | .[$k] | item($k | qk + ":")[]]
+  elif type == "array" and length > 0 then [.[] | item("-")[]]
+  elif type == "string" and test("\n") then block("") | .[0] = "|"
+  else [one] end;
+def rest($laid): delpaths([$laid[] | [.]]) | if length == 0 then "" else doc | join("\n") end;
+def head($laid): rest($laid) | if . == "" then "" else "\n" + . end;
+def tail($laid): rest($laid) | if . == "" then "" else "\n\n" + . end;
+def swap: "--- replace\n" + .old_string + "\n+++ with\n" + .new_string;
+def laid($n):
+  def s($k): .[$k] | type == "string";
+  if type != "object" then null
+  elif ($n | test("^(Bash|Shell)$")) and s("command") then
+    {body: (.command + tail(["command", "description"])), plain: (keys - ["command", "description"] == [])}
+  elif $n == "Write" and s("file_path") and s("content") then
+    {body: (.file_path + head(["file_path", "content"]) + "\n\n" + .content)}
+  elif $n == "Edit" and s("file_path") and s("old_string") and s("new_string") then
+    {body: (.file_path + head(["file_path", "old_string", "new_string"]) + "\n" + swap)}
+  elif $n == "MultiEdit" and s("file_path") and (.edits | type == "array" and length > 0
+      and all(type == "object" and (.old_string | type == "string") and (.new_string | type == "string"))) then
+    {body: (.file_path + head(["file_path", "edits"])
+      + (.edits | map("\n" + (rest(["old_string", "new_string"]) | if . == "" then "" else . + "\n" end) + swap) | join("\n")))}
+  elif $n == "NotebookEdit" and s("notebook_path") and s("new_source") then
+    {body: (.notebook_path + head(["notebook_path", "new_source"]) + "\n\n" + .new_source)}
+  elif $n == "WebFetch" and s("url") and s("prompt") then {body: (.url + head(["url", "prompt"]) + "\n\n" + .prompt)}
+  elif $n == "WebSearch" and s("query") then {body: (.query + tail(["query"]))}
+  else null end;
+.tool_name as $n | ($n + ": ") as $p | .tool_input as $i
+| ($i | laid($n)) as $l
+| (if $l then $p + $l.body else $n + ":\n" + ($i | doc | join("\n")) end | vis) as $all | $all[0:20000] as $kept
+| (try ($p + ($i.command // $i.file_path // $i.url // $i.description // ($i | tostring) | tostring
+    | split("\n") | map(select(test("\\S"))) | first // "" | .[0:110]) | vis) catch null) as $short
+| {tool: (if $short then $n else "" end), label: $kept, short: ($short // ""), cut: (($all | length) - ($kept | length))}
+| .oneline = ($l.plain == true and .cut == 0 and .label == .short and (.label | length) <= 40
+    and ($i.command | vis == . and test("\\S") and (test("[\n\t]|\\s\\s|^\\s|\\s$") | not)))
+'
+
 cmd_approve() {
   local in tool short cut shown ask pick before
   in=$(cat)
   # short (first non-empty line, 110 characters) for the desk's menu, state and log;
   # shown ({label, short, cut, oneline}, the whole input up to 20000 characters) for the phone.
-  { IFS= read -r tool; IFS= read -r short; IFS= read -r cut; IFS= read -r shown; } < <(jq -r "$JQ_DEFS"'
-    .tool_name as $n | ($n + ": ") as $p
-    | (.tool_input.command // .tool_input.file_path // .tool_input.url // .tool_input.description // (.tool_input | tostring)) | tostring
-    | ($p + .) as $all | $all[0:20000] as $kept
-    | {label: ($kept | vis), short: ($p + (split("\n") | map(select(test("\\S"))) | first // "" | .[0:110]) | vis),
-       cut: (($all | length) - ($kept | length))}
-    | .oneline = (.cut == 0 and .label == .short and (.label | length) <= 120)
-    | $n, .short, .cut, tojson' <<<"$in" 2>/dev/null)
+  # tool and short are empty where the desk's menu has always had them so (input not an object).
+  { IFS= read -r tool; IFS= read -r short; IFS= read -r cut; IFS= read -r shown; } < <(jq -r "$JQ_DEFS$APPROVE_JQ"'
+    | .tool, .short, .cut, (del(.tool) | tojson)' <<<"$in" 2>/dev/null)
   case $tool in
   Bash) ask="Okay to run that command?" ;;
   Edit | MultiEdit | Write | NotebookEdit) ask="Okay to change that file?" ;;
@@ -867,28 +939,40 @@ cmd_approve() {
     jq -cn '{hookSpecificOutput: {hookEventName: "PermissionRequest", decision: {behavior: "allow"}}}'
   else
     local why="The user didn't approve it." next="Don't retry it; say what you needed, starting the SAY line with Need you."
-    [[ -n $pick ]] && why="The user chose Deny."
-    [[ $PORTAL == phone && $cut != 0 ]] &&
+    case $pick in
+    Deny) why="The user chose Deny." ;;
+    Refused) why="The user tried to allow it, but it was refused." ;;
+    Unsent) why="It couldn't be shown on the user's phone, so it was denied." ;;
+    esac
+    [[ $PORTAL == phone && $pick != Unsent && $cut != 0 ]] &&
       next="It was too long to review on the phone, so it can't be allowed there: don't retry it as is; shorten it or split it into smaller steps."
     jq -cn --arg m "$why $next" '{hookSpecificOutput: {hookEventName: "PermissionRequest", decision: {behavior: "deny", message: $m}}}'
   fi
 }
 
 # shown ask cut: waits for libexec/portal to write the answer (allow or deny) to
-# approve.<id>. A command the phone didn't fully receive (cut > 0) is never allowed.
+# approve.<id>, and prints Allow once, Deny, Refused (allowed, but cut > 0: a
+# command the phone didn't fully receive is never allowed) or Unsent (the event
+# couldn't be made, so there's nothing to wait for). shown goes in on stdin: a
+# label of control characters can pass the 128 KiB limit on one argument.
 phone_approve() {
-  local answer="" end
+  local answer="" end event
   clock
   end=$((CLOCK + PORTAL_APPROVE_TIMEOUT * 100))
-  phone_send "$(jq -cn --arg id "$APPROVE_ID" --arg ask "$2" --argjson shown "${1:-null}" --argjson t "$PORTAL_APPROVE_TIMEOUT" \
-    --argjson since "$CLOCK" '{type:"approve", id:$id, ask:$ask} + ($shown // {label: "", short: "", cut: 1, oneline: false})
-    + {timeout:$t, since:($since / 100)}')"
+  if ! event=$(jq -c --arg id "$APPROVE_ID" --arg ask "$2" --argjson t "$PORTAL_APPROVE_TIMEOUT" --argjson since "$CLOCK" \
+    'if type == "object" and (.label | type) == "string" then . else error("no label") end
+    | {type:"approve", id:$id, ask:$ask} + . + {timeout:$t, since:($since / 100)}' <<<"$1" 2>>"$RT/glitch.log") ||
+    ! phone_send "$event"; then
+    log "approve: couldn't send the approval to the phone"
+    echo Unsent
+    return
+  fi
   while [[ ! -s $PH/approve.$APPROVE_ID ]] && clock && ((CLOCK <= end)); do sleep 0.2; done
   answer=$(cat "$PH/approve.$APPROVE_ID" 2>/dev/null)
   rm -f "$PH/approve.$APPROVE_ID"
   phone_send "$(jq -cn --arg id "$APPROVE_ID" --arg a "${answer:-none}" '{type:"approved", id:$id, answer:$a}')"
   case "$answer" in
-  allow) [[ $3 == 0 ]] && echo "Allow once" || echo "Deny" ;;
+  allow) [[ $3 == 0 ]] && echo "Allow once" || echo "Refused" ;;
   deny) echo "Deny" ;;
   esac
 }

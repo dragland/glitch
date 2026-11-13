@@ -7,7 +7,9 @@
 // A page's message "refresh" refreshes the saved set and is answered {set: <newest>}.
 // Cache "handoff" holds /allow {id, at}: Allow once pressed on a notification, for the page to send once
 // it's open (a notification action works on a locked phone; opening the app doesn't). Allow once is offered
-// only for a command the notification shows whole (oneline); the page checks that again.
+// only when the approval's oneline is set: bin/glitch sets it for a plain Bash command of at most 40
+// characters, which a collapsed notification's single line shows whole. The page checks oneline again;
+// neither has a rule of its own.
 const FILES = ["/", "/app.js", "/orb.js", "/plugin/orb.mjs", "/plugin/orb.glsl", "/sounds/start.wav", "/sounds/stop.wav",
   "/sounds/unsure.wav", "/icon-192.png", "/icon-512.png", "/icon-mono-192.png", "/manifest.webmanifest", "/api/reactions"]
 const SET = "shell-", HANDOFF = "handoff", TAG = "glitch"
@@ -115,6 +117,7 @@ async function woke(answered) {
   if (answered) for (const x of left) x.close()
 }
 
+// Text only, for an approval from before short existed; what it offers depends on oneline alone.
 function brief(label, max = 120) {
   const first = label.split("\n")[0], chars = Array.from(first)
   return chars.length > max || first !== label ? chars.slice(0, max - 1).join("").trimEnd() + "…" : label

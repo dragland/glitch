@@ -41,18 +41,24 @@ Events (each carries its "type"):
            spoken; "" when there is none); body: the full reply or the error, up to 4000
            characters; speech: whether a say clip follows
   approve  {id, ask, label, short, cut, oneline, timeout, left}  ask: the question to show;
-           label: the whole tool input after "<Tool>: ", up to 20000 characters; short: its
-           first non-empty line, up to 110 (the desk's menu shows the same); in both, control
-           and format characters other than newline and tab are shown as \\u{hex}; cut: the
-           characters left out of label (> 0 means it can't be allowed here); oneline: label
-           is one line of at most 120 characters, cut is 0 and short == label; timeout: s in
-           all; left: s still to go when sent (events.jsonl carries `since`, CLOCK_BOOTTIME s,
-           from which this server works it out)
+           label: the whole tool input, up to 20000 characters: "<Tool>: " and a layout for
+           Bash/Shell (the command), Write, Edit, MultiEdit, NotebookEdit, WebFetch and
+           WebSearch, with any field the layout doesn't show as key: value lines (only Bash's
+           description is left out), else "<Tool>:" and every field as key: value lines;
+           short: "<Tool>: " and up to 110 characters of one field's first non-empty line
+           (the desk's menu title; the notification's text); in both, characters that show as
+           nothing or as a plain space are shown as \\u{hex} (bin/glitch's vis); cut: the
+           characters left out of label (> 0 means it can't be allowed here); oneline: the
+           only approval a notification may offer Allow for: a Bash/Shell command with no
+           field but its description, cut 0, label == short and at most 40 characters ("Bash: "
+           included), nothing vis changed, no tab, no leading, trailing or doubled whitespace (decided in bin/glitch; the page and worker only
+           read it); timeout: s in all; left: s still to go when sent (events.jsonl carries
+           `since`, CLOCK_BOOTTIME s, from which this server works it out)
   approved {id, answer}   allow|deny|none
   hush     {}
   turn     {turn}         desk|phone|null, when RT/turn.portal changes
   hello    {state, turn, approve: [approve...], heard, reply, replay: [clip...]}  first on
-           every /api/events stream: the last state, heard and reply events, the pending
+           every /api/events stream: the last state event, heard text and reply event, the pending
            approvals and the speech clips not yet played. A new turn on either portal drops
            the earlier turn's unplayed speech from replay.
 
@@ -138,6 +144,7 @@ MAX_CONNECTIONS = 32
 MAX_UNPAIRED = 16
 MAX_UNPAIRED_PER_HOST = 8
 UNPAIRED_SECONDS = 10
+KNOWN_SECONDS = 30 * 86400
 PING_SECONDS = 5
 DEAD_PEER_MS = 20000
 PAIR_TRIES = 5
@@ -151,7 +158,9 @@ TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript", ".mjs": 
          ".webmanifest": "application/manifest+json"}
 APPROVE_FIELDS = ("id", "ask", "label", "short", "cut", "oneline", "timeout")
 CSP = "default-src 'self'; frame-ancestors 'none'"
-INLINE = re.compile(rb"<(style|script)>(.*?)</\1>", re.DOTALL)
+# An inline block, with or without attributes; a <script src> is loaded under 'self', not by hash.
+INLINE = re.compile(rb"<(style|script)(\s[^>]*)?>(.*?)</\1\s*>", re.DOTALL | re.IGNORECASE)
+SRC = re.compile(rb"\ssrc\s*=", re.IGNORECASE)
 
 PAIR_PAGE = b"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width, initial-scale=1">
 <meta name=theme-color content="#0a0b0e"><meta name=color-scheme content=dark><title>glitch</title>
@@ -559,7 +568,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def vouch(self):
         self.deadline.cancel()
-        self.server.release(self.request, known=self.client_address[0])
+        self.server.release(self.request, known=(self.client_address[0], sha(self.key)))
 
     def cut(self):
         try:
@@ -786,8 +795,13 @@ class Handler(BaseHTTPRequestHandler):
         if ctype.startswith("text/html"):
             # Inline <style> and <script> blocks are allowed by hash, nothing else inline.
             src = {}
-            for tag, body in INLINE.findall(data):
-                src.setdefault(tag.decode(), []).append(f"'sha256-{base64.b64encode(hashlib.sha256(body).digest()).decode()}'")
+            for tag, attrs, body in INLINE.findall(data):
+                if SRC.search(attrs):
+                    continue
+                # Browsers hash the block after turning CRLF and CR into LF, so a CRLF checkout still matches.
+                body = body.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+                src.setdefault(tag.decode().lower(), []).append(
+                    f"'sha256-{base64.b64encode(hashlib.sha256(body).digest()).decode()}'")
             csp += "".join(f"; {tag}-src 'self' {' '.join(h)}" for tag, h in src.items())
         self.send_response(code)
         self.send_header("Content-Type", ctype)
@@ -807,35 +821,48 @@ class Server(ThreadingHTTPServer):
     daemon_threads = True
 
     # Until a connection shows a paired cookie it is unpaired, counted per host and
-    # in total so that strangers can't take every slot. A host that has shown one
-    # (the phone) is not counted.
+    # in total so that strangers can't take every slot. A host that showed one in
+    # the last KNOWN_SECONDS, for a device still paired (the phone), is left out of
+    # the total but keeps its own per-host cap.
     def __init__(self, *args):
         super().__init__(*args)
         self.slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
         self.guard = threading.Lock()
         self.hosts = {}
         self.loose = {}
-        self.known = set()
+        self.known = {}  # host -> (CLOCK_BOOTTIME s of its last paired cookie, that device's hash)
+
+    def is_known(self, host):
+        seen, device = self.known.get(host, (None, None))
+        if seen is None:
+            return False
+        if time.clock_gettime(time.CLOCK_BOOTTIME) - seen > KNOWN_SECONDS or device not in self.portal.device_hashes():
+            del self.known[host]
+            return False
+        return True
 
     def admit(self, request, host):
         with self.guard:
-            if host in self.known:
-                return True
-            if self.hosts.get(host, 0) >= MAX_UNPAIRED_PER_HOST or len(self.loose) >= MAX_UNPAIRED:
+            known = self.is_known(host)
+            if self.hosts.get(host, 0) >= MAX_UNPAIRED_PER_HOST:
+                return False
+            if not known and sum(1 for _, k in self.loose.values() if not k) >= MAX_UNPAIRED:
                 return False
             self.hosts[host] = self.hosts.get(host, 0) + 1
-            self.loose[request] = host
+            self.loose[request] = (host, known)
             return True
 
     def release(self, request, known=None):
         with self.guard:
-            host = self.loose.pop(request, None)
+            host, _ = self.loose.pop(request, (None, None))
             if host:
                 self.hosts[host] -= 1
                 if not self.hosts[host]:
                     del self.hosts[host]
-            if known and len(self.known) < 256:
-                self.known.add(known)
+            if known:
+                self.known[known[0]] = (time.clock_gettime(time.CLOCK_BOOTTIME), known[1])
+                if len(self.known) > 256:
+                    del self.known[min(self.known, key=lambda h: self.known[h][0])]
 
     def process_request(self, request, client_address):
         if not self.admit(request, client_address[0]):
