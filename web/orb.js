@@ -38,7 +38,7 @@ export async function createOrbView(canvas, opts = {}) {
   const body = await fetchShader()
   const gl = canvas.getContext("webgl2", { alpha: true, premultipliedAlpha: true, antialias: false })
   if (!gl) throw new Error("WebGL2 is not available")
-  let prog = null, buf = null, locs = {}
+  let prog = null, locs = {}
 
   function setup() {
     const vs = compile(gl, gl.VERTEX_SHADER, VERTEX), fs = compile(gl, gl.FRAGMENT_SHADER, HEADER + body)
@@ -50,7 +50,7 @@ export async function createOrbView(canvas, opts = {}) {
     gl.deleteShader(fs)
     if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog))
     gl.useProgram(prog)
-    buf = gl.createBuffer()
+    const buf = gl.createBuffer()
     gl.bindBuffer(gl.ARRAY_BUFFER, buf)
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, 0, 1, 0, 0, 1, 1, 1]), gl.STATIC_DRAW)
     const at = gl.getAttribLocation(prog, "corner")
@@ -126,43 +126,30 @@ export async function createOrbView(canvas, opts = {}) {
     if (opts.onBeforeStep) opts.onBeforeStep(frame)
     frame = core.step(dt)
     render()
-    if (opts.onFrame) opts.onFrame(frame)
     arm()
     if (!frame.visible) { cancelAnimationFrame(raf); raf = 0 }
   }
 
-  function onLost(e) {
+  canvas.addEventListener("webglcontextlost", e => {
     e.preventDefault()
     lost = true
     cancelAnimationFrame(raf)
     raf = 0
-  }
-  function onRestored() {
+  })
+  canvas.addEventListener("webglcontextrestored", () => {
     lost = false
     setup()
     resume()
     if (!raf) render()
-  }
-  canvas.addEventListener("webglcontextlost", onLost)
-  canvas.addEventListener("webglcontextrestored", onRestored)
+  })
 
   const fresh = () => { frame = core.frame(); settle() }
   return {
     set(json) { core.set(json); fresh() },
     event(line) { core.event(line) },
     mic(level) { core.mic(level) },
-    cursor(x, y) { core.cursor(x, y) },
     reduceMotion(on) { core.reduceMotion(on); fresh() },
-    hide() { core.hide(); fresh() },
     start() { running = true; resume() },
-    stop() { running = false; cancelAnimationFrame(raf); raf = 0 },
-    get frame() { return frame },
-    destroy() {
-      this.stop()
-      clearTimeout(waker)
-      canvas.removeEventListener("webglcontextlost", onLost)
-      canvas.removeEventListener("webglcontextrestored", onRestored)
-      if (!gl.isContextLost()) { gl.deleteBuffer(buf); gl.deleteProgram(prog) }
-    }
+    stop() { running = false; cancelAnimationFrame(raf); raf = 0 }
   }
 }

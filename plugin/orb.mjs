@@ -41,6 +41,7 @@
 
 export const stage = { size: 760, orbY: 260 }
 export const aa = (k, dpr) => 1 / (k * dpr)
+export const SAY_LAG = 0.06  // pw-play takes a moment to start
 
 const palettes = {
   electric: { color1: "#00f0ff", color2: "#ff0055", bg: "#08080c" },
@@ -273,7 +274,7 @@ export function createOrb(opts = {}) {
     case "say": {
       sayHz = Number(a[1]) || 50
       sayEnv = a.slice(2).map(v => Math.max(0, Math.min(1, Number(v) / 99)) || 0)
-      sayStart = clock + 0.06  // pw-play takes a moment to start
+      sayStart = clock + SAY_LAG
       break
     }
     case "hush":

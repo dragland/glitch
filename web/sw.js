@@ -5,8 +5,9 @@
 // The shell is saved as whole sets, one cache each ("shell-<ms>"), and a page loads
 // every file from the set its navigation got; saved files carry X-Glitch-Set: <name>.
 // A page's message "refresh" refreshes the saved set and is answered {set: <newest>}.
-// Cache "handoff" holds /allow {id, at}: Allow once pressed on a notification, for the
-// page to send once it's open (a notification action works on a locked phone; opening the app doesn't).
+// Cache "handoff" holds /allow {id, at}: Allow once pressed on a notification, for the page to send once
+// it's open (a notification action works on a locked phone; opening the app doesn't). Allow once is offered
+// only for a command the notification shows whole (oneline); the page checks that again.
 const FILES = ["/", "/app.js", "/orb.js", "/plugin/orb.mjs", "/plugin/orb.glsl", "/sounds/start.wav", "/sounds/stop.wav",
   "/sounds/unsure.wav", "/icon-192.png", "/icon-512.png", "/icon-mono-192.png", "/manifest.webmanifest", "/api/reactions"]
 const SET = "shell-", HANDOFF = "handoff", TAG = "glitch"
@@ -90,11 +91,12 @@ self.addEventListener("message", e => {
 // unless a tab of the site is visible ("Sites with a currently visible tab don't
 // need to show notifications", chrome/browser/push_messaging/
 // push_messaging_notification_manager.cc), and it forgives an occasional miss.
+// One of the site's notifications still showing counts as shown.
 self.addEventListener("push", e => e.waitUntil(woke()))
 
 async function woke(answered) {
   const wins = await clients.matchAll({ type: "window", includeUncontrolled: true })
-  if (wins.some(w => w.visibilityState === "visible" && w.focused)) return
+  if (wins.some(w => w.visibilityState === "visible" && w.focused && new URL(w.url).pathname === "/")) return
   let n = null
   try {
     const r = await fetch("/api/notice", { cache: "no-store", signal: AbortSignal.timeout(5000) })
@@ -103,14 +105,14 @@ async function woke(answered) {
   // A push without a payload can't say which it was, so out of reach it's one text for both.
   if (!n) return show("glitch", "Something's waiting at home.")
   const a = n.approve?.[0]
-  if (a) return show("glitch needs you", brief(a.label), {
+  if (a) return show("glitch needs you", a.short ?? brief(a.label || ""), {
     data: { id: a.id }, requireInteraction: true,
-    actions: [{ action: "allow", title: "Allow once" }, { action: "deny", title: "Deny" }]
+    actions: [a.oneline ? { action: "allow", title: "Allow once" } : { action: "open", title: "Open" }, { action: "deny", title: "Deny" }]
   })
   if (n.reply) return show("glitch finished", n.reply.summary)
   const left = await self.registration.getNotifications({ tag: TAG })
   if (!answered && left.some(x => x.data?.id)) return show("glitch", "No longer waiting for you.", { silent: true, renotify: false })
-  for (const x of left) x.close()
+  if (answered) for (const x of left) x.close()
 }
 
 function brief(label, max = 120) {
