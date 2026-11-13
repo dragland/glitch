@@ -138,8 +138,14 @@ fi
 step "Orb shader"
 qsb_out="$REPO/plugin/glitch.frag.qsb"
 if [[ ! -s $qsb_out || $REPO/plugin/orb.glsl -nt $qsb_out ]]; then
-  "$REPO/plugin/build-shader" || die "couldn't build the orb shader from orb.glsl"
-  ok "compiled orb.glsl"
+  # After a git pull, mtimes can make the committed glitch.frag.qsb look older than orb.glsl.
+  if "$REPO/plugin/build-shader"; then
+    ok "compiled orb.glsl"
+  elif [[ -s $qsb_out ]]; then
+    ok "using the committed glitch.frag.qsb"
+  else
+    die "couldn't build the orb shader from orb.glsl"
+  fi
 else
   ok "glitch.frag.qsb is current"
 fi
@@ -209,7 +215,7 @@ systemctl --user daemon-reload
   printf '%s\n' "$PORTAL_ADDR" "$PORTAL_PORT" "$PORTAL_CERT" "$PORTAL_KEY"
 )
 if [[ -z $p_addr ]]; then
-  ok "off (to use it: set PORTAL_ADDR in ~/.config/glitch/glitch.conf, run glitch cert, re-run ./install.sh)"
+  ok "off (to use it: set PORTAL_ADDR in ~/.config/glitch/glitch.conf, run glitch cert, install its CA file on the phone, re-run ./install.sh)"
 elif [[ ! -f $DATA/portal/glitch-ca.crt || ! -f $p_cert || ! -f $p_key ]]; then
   ok "off until there's a certificate: run glitch cert, install its CA file on the phone, re-run ./install.sh"
 else
@@ -233,6 +239,7 @@ else
     IFS=. read -r a b c d <<<"$p_addr"
     n=$(((a << 24 | b << 16 | c << 8 | d) & (0xffffffff << (32 - lan)) & 0xffffffff))
     lan="$((n >> 24)).$((n >> 16 & 255)).$((n >> 8 & 255)).$((n & 255))/$lan"
+    # ufw saves each rule in user.rules as "### tuple ### allow tcp <port> <dst> any <src> in[_<iface>]".
     rules=$(cat /etc/ufw/user.rules 2>/dev/null)
     grep -q "^### tuple ### allow tcp $p_port 0\.0\.0\.0/0 any ${lan//./\\.} in\b" <<<"$rules" ||
       todo+=("sudo ufw allow from $lan to any port $p_port proto tcp comment 'glitch portal LAN'")

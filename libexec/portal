@@ -1,52 +1,104 @@
 #!/usr/bin/env python3
 """glitch portal: the phone's way into the same voice companion (bin/glitch portal).
+This docstring is the wire format between bin/glitch, this server, web/app.js and web/sw.js.
 
     portal --addr IP --port N --rt RT --data DATA --glitch BIN --web DIR --plugin DIR
            (--cert PEM --key PEM | --plain) [--max-seconds S]
 
-Phone turns write their channel to RT/phone (bin/glitch, GLITCH_PORTAL=phone):
-  events.jsonl   one JSON object per line, relayed as SSE events named by "type"
-                 (read from the start at launch, so a restart rebuilds hello):
-                   state    {state, reaction, detail}
-                   signal   {line}         an orb.events line (plugin/orb.mjs), minus "say";
-                                           "turn" starts a phone turn, "rest" ends its work
-                   heard    {text}         a phone turn started on this text
-                   clip     {id, url, kind, ms, env, with, delay, approve}
-                   reply    {summary, body}
-                   approve  {id, label, ask, timeout}
-                   approved {id, answer}   allow|deny|none
-                   hush     {}
-  clips/<id>     the clips; clips/<id>.played (played|hushed) is written here and
-                 ends bin/glitch's wait for that clip
-  approve.<id>   the answer (allow|deny), written here
-  online         the server's pid, while a page holds /api/events
-  pair           {hash: sha256 of the code, expires, tries}, made by `glitch pair`
-RT/turn.portal   "<desk|phone> <pid>" while a turn runs; its changes reach the page
-                 as `turn` {turn: desk|phone|null}, which no file holds
-DATA/portal/devices  {"<sha256 of device key>": {paired: epoch, agent, push?: endpoint}}, one entry per phone;
-                     edited only under flock on DATA/portal/devices.lock (glitch unpair takes it too)
-DATA/portal/vapid.pem the P-256 key that signs Web Push (VAPID, RFC 8292), made on first start
+Files. Phone turns (bin/glitch with GLITCH_PORTAL=phone) write RT/phone; desk turns never do.
+  RT/phone/events.jsonl  one JSON object per line, appended under flock, relayed as SSE
+                 events named by "type". Read from the start at launch, so a restart
+                 rebuilds hello; replay has no side effects (`live` gates .played and pushes).
+  RT/phone/state.json    the phone turn's last {state, reaction, status} (bin/glitch's own)
+  RT/phone/clips/<id>    the clips (<digits>-<kind>.wav); <id>.played (played|hushed) is
+                 written here and ends bin/glitch's wait for that clip
+  RT/phone/approve.<id>  the answer (allow|deny), written here, read and removed by bin/glitch
+  RT/phone/online        this server's pid, while a page holds /api/events
+  RT/phone/pair          {hash: sha256 of the 6 digits, expires: epoch s, tries}, made by
+                 `glitch pair`; removed when used, expired or after 5 wrong codes
+  RT/phone/sounds/<name>.wav  the chimes (start, stop, unsure), rendered by `glitch portal`
+                 before it starts this server: they keep the old sound after reactions.json
+                 changes until the portal restarts
+  RT/turn.portal "<desk|phone> <pid>" while a turn runs (replaced whole); its changes reach
+                 the page as the `turn` event, which no file holds
+  DATA/portal/devices    {"<sha256 of device key>": {paired: epoch, agent, push?: endpoint}},
+                 one entry per phone; edited only under flock on devices.lock (glitch unpair
+                 takes it too and deletes the file)
+  DATA/portal/vapid.pem  the P-256 key that signs Web Push (VAPID, RFC 8292), made on first start
+  DATA/portal/glitch-ca.crt, cert.pem, key.pem  made by `glitch cert`: the CA file the phone
+                 installs (also what the unit's ConditionPathExists waits for), and the
+                 server's certificate and key (PORTAL_CERT, PORTAL_KEY)
 
-Push: the messages carry no payload (no encryption, nothing readable at the push
-service), so the service worker asks GET /api/notice what to show:
-  {approve: [{id, label, ask}], reply: {summary} | null}
-GET /api/push gives {key}, the applicationServerKey; POST /api/push {endpoint}
-stores this device's subscription (endpoint null forgets it). due() decides when
-to push: "needs you" once an approval waits NEED_AFTER s, "settled" when one it
-pushed for ends unanswered (timed out, or its turn ended), "finished" once a
-reply's speech went unplayed (no page for UNHEARD_AFTER s, or a page that didn't
-play it within its length + 5 s). Phone turns only: desk turns never write here.
+Events (each carries its "type"):
+  state    {state, reaction, status, detail}  status: the status line, lowercase, shown as
+           is, or "" for none ("running journalctl", "thinking", "waiting for the last
+           request", "didn't catch that", "cancelled"); made in bin/glitch. detail is for logs.
+  signal   {line}         an orb.events line (plugin/orb.mjs), minus "say"; "turn" starts a
+                          phone turn, "rest" ends its work
+  heard    {text}         a phone turn started on this text
+  clip     {id, url, kind, ms, env, with, delay, approve}  (below)
+  reply    {summary, body, speech}  summary: the spoken line (or the one that would be
+           spoken; "" when there is none); body: the full reply or the error, up to 4000
+           characters; speech: whether a say clip follows
+  approve  {id, ask, label, short, cut, oneline, timeout, left}  ask: the question to show;
+           label: the whole tool input after "<Tool>: ", up to 20000 characters; short: its
+           first non-empty line, up to 110 (the desk's menu shows the same); in both, control
+           and format characters other than newline and tab are shown as \\u{hex}; cut: the
+           characters left out of label (> 0 means it can't be allowed here); oneline: label
+           is one line of at most 120 characters, cut is 0 and short == label; timeout: s in
+           all; left: s still to go when sent (events.jsonl carries `since`, CLOCK_BOOTTIME s,
+           from which this server works it out)
+  approved {id, answer}   allow|deny|none
+  hush     {}
+  turn     {turn}         desk|phone|null, when RT/turn.portal changes
+  hello    {state, turn, approve: [approve...], heard, reply, replay: [clip...]}  first on
+           every /api/events stream: the last state, heard and reply events, the pending
+           approvals and the speech clips not yet played. A new turn on either portal drops
+           the earlier turn's unplayed speech from replay.
 
 Clips: kind is cue, say, ask or aside; ms its length; env the orb's "say" payload
-("<hz> <v>...") or null. A cue plays on arrival, over anything, like the desk's
-beeps. Speech (say, ask, aside) plays one clip at a time in arrival order, and
-the page POSTs /api/played {id} when each one ends: the turn waits for that
-(or for ms + 2 s, or not at all with no page connected), as the desk waits for
-its speaker, so the next state comes after the speech. A clip whose `with` is
-set starts `delay` ms after clip `with` started (the desk's contour cue leading
-into speech) instead of queueing, or at once if that moment has passed. An ask
-clip belongs to approval `approve`: it is dropped once that is answered, and
-the page stops it on `approved`. Speech that never played is in hello.replay.
+("<hz> <v>...") or null; url "/clips/<id>". A cue plays on arrival, over anything,
+like the desk's beeps. Speech (say, ask, aside) plays one clip at a time in arrival
+order, and the page POSTs /api/played {id} when each one ends: the turn waits for
+that (or for ms + 2 s, or not at all with no page connected), as the desk waits for
+its speaker, so the next state comes after the speech. A clip whose `with` is set
+starts `delay` ms after clip `with` started (the desk's contour cue leading into
+speech) instead of queueing, or at once if that moment has passed. An ask clip
+belongs to approval `approve`: it is dropped once that is answered, and the page
+stops it on `approved`.
+
+Routes. Every request: Host must be ADDR:PORT (else 421); every POST: Origin must be this
+origin (else 403). /api/* and /clips/* refuse navigations (Sec-Fetch-Mode navigate or
+Sec-Fetch-Dest document: 403) and treat a cross-site or same-site Sec-Fetch-Site as
+unpaired. Without a paired cookie, anything but the public routes gets 401 under
+/api/ and /clips/, else 303 to /pair. Errors are {error}. Every response has
+Content-Security-Policy default-src 'self'; frame-ancestors 'none', plus hashes for an
+HTML page's inline <style> and <script> blocks.
+  public  GET /pair (the pairing page), /manifest.webmanifest, /icon-*.png
+          POST /api/pair {code} -> {ok} with the cookie, or 403
+  GET  /, web/* files   the page; HTML sets the cookie again (glitch_device, HttpOnly,
+                        Secure, SameSite=Lax: a home-screen launch sends no Strict cookie)
+  GET  /plugin/orb.mjs, /plugin/orb.glsl, /sounds/<name>.wav, /clips/<id>
+  GET  /api/events      SSE: "retry: 2000", hello, the events, ": ping" every 5 s
+  GET  /api/reactions   the merged reactions.json (`glitch _reactions`)
+  GET  /api/notice      {approve: [approve...], reply: {summary} | null}, for the service
+                        worker: reply is set while a reply's speech went unheard
+  GET  /api/push        {key}, the applicationServerKey (404 with no VAPID key)
+  POST /api/push        {endpoint} stores this device's subscription (null forgets it); 422
+                        for an endpoint outside PUSH_HOSTS
+  POST /api/talk        a recording (Content-Type one of AUDIO, up to 50 MiB) -> {outcome}:
+                        turn, fresh ("new chat" alone), empty (nothing heard) or error;
+                        415 type, 413 size, 422 undecodable, 500 transcription failed
+  POST /api/approve     {id, allow: bool} -> {ok}; 409 not pending; 422 allow with cut > 0
+  POST /api/cancel      stops the running turn, whichever portal started it -> {ok}
+  POST /api/played      {id}: that clip ended; no id: hush every unplayed one -> {ok}
+
+Push: the messages carry no payload (no encryption, nothing readable at the push
+service), so the service worker asks GET /api/notice what to show. due() decides
+when to push: "needs you" once an approval waits NEED_AFTER s, "settled" when one
+it pushed for ends unanswered (timed out, or its turn ended), "finished" once a
+reply's speech went unplayed (no page for UNHEARD_AFTER s, or a page that didn't
+play it within its length + 5 s).
 """
 
 import argparse
@@ -68,10 +120,10 @@ import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import urlsplit
 
 COOKIE = "glitch_device"
-COOKIE_AGE = 34560000  # Chrome caps a cookie's lifetime at 400 days
+COOKIE_AGE = 34560000  # Chrome caps a cookie's lifetime at 400 days, so every HTML response sets it again
 PUBLIC = {("GET", "/pair"), ("POST", "/api/pair"),
           ("GET", "/manifest.webmanifest"), ("GET", "/icon-192.png"), ("GET", "/icon-512.png"),
           ("GET", "/icon-mono-192.png"), ("GET", "/icon-mono-512.png")}
@@ -83,6 +135,7 @@ PLUGIN_FILES = {"orb.mjs", "orb.glsl"}
 SPEECH = {"say", "ask", "aside"}
 MAX_UPLOAD = 50 << 20
 MAX_CONNECTIONS = 32
+MAX_UNPAIRED = 16
 MAX_UNPAIRED_PER_HOST = 8
 UNPAIRED_SECONDS = 10
 PING_SECONDS = 5
@@ -92,27 +145,29 @@ NEED_AFTER = 5
 UNHEARD_AFTER = 3
 PUSH_HOSTS = {"fcm.googleapis.com", "updates.push.services.mozilla.com"}
 PUSH_TTL = {"needs": 300, "settled": 300, "finished": 3600}
-PUSH_URGENCY = {"needs": "high", "settled": "normal", "finished": "normal"}
+PUSH_URGENCY = {"needs": "high", "settled": "high", "finished": "normal"}
 TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript", ".mjs": "text/javascript",
-         ".css": "text/css", ".json": "application/json", ".svg": "image/svg+xml", ".png": "image/png",
-         ".wav": "audio/wav", ".glsl": "text/plain; charset=utf-8", ".webmanifest": "application/manifest+json",
-         ".woff2": "font/woff2", ".ico": "image/x-icon", ".txt": "text/plain; charset=utf-8"}
+         ".png": "image/png", ".wav": "audio/wav", ".glsl": "text/plain; charset=utf-8",
+         ".webmanifest": "application/manifest+json"}
+APPROVE_FIELDS = ("id", "ask", "label", "short", "cut", "oneline", "timeout")
+CSP = "default-src 'self'; frame-ancestors 'none'"
+INLINE = re.compile(rb"<(style|script)>(.*?)</\1>", re.DOTALL)
 
 PAIR_PAGE = b"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width, initial-scale=1">
 <meta name=theme-color content="#0a0b0e"><meta name=color-scheme content=dark><title>glitch</title>
-<style>html,body{margin:0;height:100%;background:#0a0b0e;color:#6b7079;font:15px/1.4 system-ui,sans-serif}
+<style>html,body{margin:0;height:100%;background:#0a0b0e;color:#9ba0a8;font:16px/1.4 system-ui,sans-serif}
 body{display:grid;place-items:center}form{display:grid;gap:22px;justify-items:center;text-align:center;padding:24px}
-p{margin:0;max-width:17em;min-height:1.4em}
+p{margin:0;max-width:17em}#m{min-height:2.8em}
 input{width:6.2em;font:30px ui-monospace,monospace;letter-spacing:.2em;text-align:center;color:#e6e8ec;background:none;
-border:0;border-bottom:1px solid #2a2d33;border-radius:0;padding:6px 0;outline:none}input:focus{border-color:#5a5f68}input::placeholder{color:#3a3e45;letter-spacing:.05em}
-button{font:inherit;color:#d8dbe0;background:none;border:1px solid #2a2d33;border-radius:99px;padding:11px 30px}</style>
+border:0;border-bottom:1px solid #2a2d33;border-radius:0;padding:6px 0;outline:none}input:focus{border-color:#5a5f68}input::placeholder{color:#5a5f68;letter-spacing:.05em}
+button{font:inherit;font-size:16px;color:#d8dbe0;background:none;border:1px solid #2a2d33;border-radius:99px;padding:12px 26px;min-height:48px}</style>
 <form id=f><p>Say &ldquo;pair my phone&rdquo; at the desk, then type the code it speaks.</p>
 <input id=c inputmode=numeric autocomplete=one-time-code maxlength=6 placeholder=code aria-label=code autofocus>
 <button>Pair</button><p id=m></p></form><script>
 f.onsubmit = async e => { e.preventDefault();
   const r = await fetch("/api/pair", {method: "POST", headers: {"Content-Type": "application/json"},
     body: JSON.stringify({code: c.value})});
-  if (r.ok) location = "/"; else m.textContent = "That code didn't work. Say \\"pair my phone\\" for a new one."; };
+  if (r.ok) location = "/"; else m.textContent = "That code didn't work. Say \\u201cpair my phone\\u201d for a new one."; };
 fetch("/api/notice").then(r => { if (r.ok) location.replace("/") });
 </script>"""
 
@@ -137,11 +192,12 @@ def write_atomic(path, text, mode=0o600):
     os.replace(tmp, path)
 
 
-def merge(a, b):
-    # jq's `*`, as bin/glitch's reaction() merges the user's reactions.json.
-    if not (isinstance(a, dict) and isinstance(b, dict)):
-        return b
-    return {**a, **{k: merge(a[k], v) if k in a else v for k, v in b.items()}}
+def shown(a):
+    # A pending approval as the page and the service worker get it.
+    left = a.get("timeout") or 0
+    if isinstance(a.get("since"), (int, float)):
+        left = max(0, round(left - (time.clock_gettime(time.CLOCK_BOOTTIME) - a["since"])))
+    return {**{k: a.get(k) for k in APPROVE_FIELDS}, "left": left}
 
 
 def frame(ev):
@@ -294,7 +350,7 @@ class Portal:
 
     def notice(self):
         with self.lock:
-            return {"approve": [{k: a.get(k) for k in ("id", "label", "ask")} for a in self.pending.values()],
+            return {"approve": [shown(a) for a in self.pending.values()],
                     "reply": {"summary": self.waiting["summary"]} if self.waiting else None}
 
     def pusher(self):
@@ -395,6 +451,7 @@ class Portal:
                 self.pending[ev.get("id")] = ev
                 if self.live:
                     self.asked[ev.get("id")] = time.monotonic()
+                ev = {"type": t, **shown(ev)}
             elif t == "approved":
                 self.pending.pop(ev.get("id"), None)
                 self.asked.pop(ev.get("id"), None)
@@ -414,7 +471,7 @@ class Portal:
         with self.lock:
             replay = [c for c in self.unplayed.values()
                       if os.path.exists(self.path("clips", c["id"])) and not os.path.exists(self.path("clips", c["id"] + ".played"))]
-            return {"type": "hello", "state": self.state, "turn": turn, "approve": list(self.pending.values()),
+            return {"type": "hello", "state": self.state, "turn": turn, "approve": [shown(a) for a in self.pending.values()],
                     "heard": self.heard, "reply": self.reply, "replay": replay}
 
     def connect(self, q, on):
@@ -466,17 +523,11 @@ class Portal:
         turn = self.turn_portal()
         if turn != self.turn:
             self.turn = turn
+            if turn == "desk":
+                with self.lock:
+                    self.unplayed.clear()
+                    self.waiting = None
             self.publish({"type": "turn", "turn": turn})
-
-    def reactions(self):
-        home = os.path.dirname(os.path.dirname(os.path.realpath(self.a.glitch)))
-        conf = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
-        out = {}
-        for f in (os.path.join(home, "config", "reactions.json"), os.path.join(conf, "glitch", "reactions.json")):
-            v = read_json(f)
-            if isinstance(v, dict):
-                out = merge(out, v)
-        return out
 
     def glitch(self, *args, timeout=30):
         env = dict(os.environ, GLITCH_PORTAL="phone")
@@ -498,21 +549,17 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def handle(self):
-        self.paired = False
         self.deadline = threading.Timer(UNPAIRED_SECONDS, self.cut)
         self.deadline.start()
         try:
             self.handle_one_request()
         finally:
             self.deadline.cancel()
-            if not self.paired:
-                self.server.unpaired(self.client_address[0], -1)
+            self.server.release(self.request)
 
     def vouch(self):
         self.deadline.cancel()
-        if not self.paired:
-            self.paired = True
-            self.server.unpaired(self.client_address[0], -1)
+        self.server.release(self.request, known=self.client_address[0])
 
     def cut(self):
         try:
@@ -549,7 +596,13 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(421, {"error": "host"})
         if method == "POST" and self.headers.get("Origin") != f"{self.p.scheme}://{self.p.host}":
             return self.send_json(403, {"error": "origin"})
-        self.key = self.device_key()
+        # A top-level navigation carries the SameSite=Lax cookie from any site, and
+        # would count as a connected page: the API answers only the page's own fetches.
+        api = path.startswith(("/api/", "/clips/"))
+        if api and (self.headers.get("Sec-Fetch-Mode") == "navigate" or self.headers.get("Sec-Fetch-Dest") == "document"):
+            return self.send_json(403, {"error": "navigation"})
+        cross = api and self.headers.get("Sec-Fetch-Site") in ("cross-site", "same-site")
+        self.key = None if cross else self.device_key()
         if self.key:
             self.vouch()
         elif (method, path) not in PUBLIC:
@@ -559,11 +612,14 @@ class Handler(BaseHTTPRequestHandler):
         if method == "POST":
             fn = {"/api/pair": self.post_pair, "/api/talk": self.post_talk, "/api/approve": self.post_approve,
                   "/api/cancel": self.post_cancel, "/api/played": self.post_played, "/api/push": self.post_push}.get(path)
-            return fn(parse_qs(url.query)) if fn else self.send_json(404, {"error": "not found"})
+            return fn() if fn else self.send_json(404, {"error": "not found"})
         if path == "/api/events":
             return self.events()
         if path == "/api/reactions":
-            return self.send_json(200, self.p.reactions())
+            r = self.p.glitch("_reactions")
+            if r.returncode or not r.stdout.strip():
+                return self.send_json(500, {"error": "reactions"})
+            return self.send(200, r.stdout.encode(), "application/json")
         if path == "/api/notice":
             return self.send_json(200, self.p.notice(), headers={"Cache-Control": "no-store"})
         if path == "/api/push":
@@ -606,14 +662,14 @@ class Handler(BaseHTTPRequestHandler):
             return {}
         return v if isinstance(v, dict) else {}
 
-    def post_pair(self, q):
+    def post_pair(self):
         code = str(self.body_json().get("code", "")).strip()
         key = re.fullmatch(r"[0-9]{6}", code) and self.p.pair(code, self.headers.get("User-Agent", ""))
         if not key:
             return self.send_json(403, {"error": "code"})
         self.send_json(200, {"ok": True}, headers=self.cookie(key))
 
-    def post_talk(self, q):
+    def post_talk(self):
         fmt = AUDIO.get(self.headers.get("Content-Type", "").split(";")[0].strip().lower())
         if not fmt:
             return self.send_json(415, {"error": "audio type"})
@@ -638,31 +694,31 @@ class Handler(BaseHTTPRequestHandler):
             if r.returncode:
                 self.p.log(f"voxtype: {r.stderr.strip()[-300:]}")
                 return self.send_json(500, {"error": "transcribe"})
+        # voxtype prints a header, a blank line, then the text.
         text = " ".join(r.stdout.split("\n\n", 1)[1].split()) if "\n\n" in r.stdout else ""
-        t2 = time.monotonic()
-        self.p.log(f"heard {ms} ms of audio: convert {t1 - t0:.2f}s, transcribe {t2 - t1:.2f}s")
-        fresh = "true" if q.get("new") == ["1"] else "false"
-        out = self.p.glitch("_heard", text, fresh, str(ms)).stdout.split()
-        self.send_json(200, {"text": text, "outcome": out[-1] if out else "error",
-                             "transcribe_ms": int((t2 - t1) * 1000)})
+        self.p.log(f"heard {ms} ms of audio: convert {t1 - t0:.2f}s, transcribe {time.monotonic() - t1:.2f}s")
+        out = self.p.glitch("_heard", text, str(ms)).stdout.split()
+        self.send_json(200, {"outcome": out[-1] if out else "error"})
 
-    def post_approve(self, q):
+    def post_approve(self):
         b = self.body_json()
         ident = str(b.get("id", ""))
         with self.p.lock:
             if ident not in self.p.pending or not isinstance(b.get("allow"), bool):
                 return self.send_json(409, {"error": "stale"})
+            if b["allow"] and self.p.pending[ident].get("cut") != 0:
+                return self.send_json(422, {"error": "cut"})
             write_atomic(self.p.path(f"approve.{ident}"), "allow" if b["allow"] else "deny")
             self.p.pending.pop(ident)
             self.p.asked.pop(ident, None)
             self.p.pushed.discard(ident)
         self.send_json(200, {"ok": True})
 
-    def post_cancel(self, q):
+    def post_cancel(self):
         self.p.glitch("cancel")
         self.send_json(200, {"ok": True})
 
-    def post_played(self, q):
+    def post_played(self):
         ident = str(self.body_json().get("id", ""))
         with self.p.lock:
             if not ident:
@@ -671,7 +727,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.p.finish([ident], "played")
         self.send_json(200, {"ok": True})
 
-    def post_push(self, q):
+    def post_push(self):
         endpoint = self.body_json().get("endpoint")
         if endpoint is not None and not (self.p.vapid and self.p.push_ok(endpoint)):
             host = urlsplit(endpoint).netloc if isinstance(endpoint, str) else type(endpoint).__name__
@@ -726,8 +782,16 @@ class Handler(BaseHTTPRequestHandler):
         self.send(code, json.dumps(obj).encode(), "application/json", headers)
 
     def send(self, code, data, ctype="text/plain", headers=None):
+        csp = CSP
+        if ctype.startswith("text/html"):
+            # Inline <style> and <script> blocks are allowed by hash, nothing else inline.
+            src = {}
+            for tag, body in INLINE.findall(data):
+                src.setdefault(tag.decode(), []).append(f"'sha256-{base64.b64encode(hashlib.sha256(body).digest()).decode()}'")
+            csp += "".join(f"; {tag}-src 'self' {' '.join(h)}" for tag, h in src.items())
         self.send_response(code)
         self.send_header("Content-Type", ctype)
+        self.send_header("Content-Security-Policy", csp)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
@@ -742,28 +806,42 @@ class Handler(BaseHTTPRequestHandler):
 class Server(ThreadingHTTPServer):
     daemon_threads = True
 
+    # Until a connection shows a paired cookie it is unpaired, counted per host and
+    # in total so that strangers can't take every slot. A host that has shown one
+    # (the phone) is not counted.
     def __init__(self, *args):
         super().__init__(*args)
         self.slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
         self.guard = threading.Lock()
         self.hosts = {}
+        self.loose = {}
+        self.known = set()
 
-    def unpaired(self, host, n):
+    def admit(self, request, host):
         with self.guard:
-            count = self.hosts.get(host, 0) + n
-            if count > MAX_UNPAIRED_PER_HOST:
+            if host in self.known:
+                return True
+            if self.hosts.get(host, 0) >= MAX_UNPAIRED_PER_HOST or len(self.loose) >= MAX_UNPAIRED:
                 return False
-            if count:
-                self.hosts[host] = count
-            else:
-                self.hosts.pop(host, None)
+            self.hosts[host] = self.hosts.get(host, 0) + 1
+            self.loose[request] = host
             return True
 
+    def release(self, request, known=None):
+        with self.guard:
+            host = self.loose.pop(request, None)
+            if host:
+                self.hosts[host] -= 1
+                if not self.hosts[host]:
+                    del self.hosts[host]
+            if known and len(self.known) < 256:
+                self.known.add(known)
+
     def process_request(self, request, client_address):
-        if not self.unpaired(client_address[0], 1):
+        if not self.admit(request, client_address[0]):
             return self.shutdown_request(request)
         if not self.slots.acquire(blocking=False):
-            self.unpaired(client_address[0], -1)
+            self.release(request)
             return self.shutdown_request(request)
         super().process_request(request, client_address)
 
