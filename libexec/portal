@@ -1,0 +1,923 @@
+#!/usr/bin/env python3
+"""glitch portal: the phone's HTTPS server, started by `glitch portal`.
+This docstring is the wire format between bin/glitch, this server, web/app.js and web/sw.js.
+
+    portal --addr IP --port N --rt RT --data DATA --glitch BIN --web DIR --plugin DIR
+           (--cert PEM --key PEM | --plain) [--max-seconds S]
+
+Files. Phone turns (bin/glitch with GLITCH_PORTAL=phone) write RT/phone; desk turns never do.
+  RT/phone/events.jsonl  one event per line, appended by bin/glitch under flock and emptied
+                 past 1 MB when a phone turn starts. This server reads it from the start
+                 at launch, then tails it and relays each event as SSE.
+  RT/phone/state.json    the phone turn's last {state, reaction, status}; only bin/glitch reads it
+  RT/phone/clips/<id>    a clip, <id> = <digits>-<kind>.wav; a phone turn's start deletes
+                 files here older than 5 minutes
+  RT/phone/clips/<id>.played  played|hushed, written by this server; ends bin/glitch's wait
+  RT/phone/approve.<id>  allow|deny, written by this server; bin/glitch reads and removes it
+  RT/phone/online        this server's pid, while a page holds /api/events
+  RT/phone/pair          {hash: sha256 of the 6 digits, expires: epoch s, tries}, written by
+                 `glitch pair`; removed when used, when found expired, after 5 wrong
+                 codes, or by `glitch unpair`
+  RT/phone/sounds/<name>.wav  the chimes (start, stop, unsure), rendered by `glitch portal`
+                 each time it starts this server
+  RT/turn.portal         "<desk|phone> <pid>" while a turn holds turn.lock; this server polls
+                 it and sends `turn` events, which events.jsonl doesn't hold
+  DATA/portal/devices    {"<sha256 of device key>": {paired: epoch s, agent, push?: endpoint}};
+                 edited only under flock on devices.lock, which `glitch unpair` also takes
+                 to delete the file
+  DATA/portal/vapid.pem  the P-256 key that signs Web Push (VAPID, RFC 8292), made on first start
+  DATA/portal/glitch-ca.crt  the CA file the phone installs, made by `glitch cert`; the unit's
+                 ConditionPathExists waits for it
+  PORTAL_CERT, PORTAL_KEY  the server's certificate and key, made by `glitch cert`
+
+Events. Each carries its "type". bin/glitch writes all but `turn` and `hello`.
+  state    {state, reaction, status, detail}  status: the status line, shown as is, or ""
+           ("running journalctl", "thinking", "waiting for the last request", "didn't
+           catch that", "cancelled"); detail: for logs
+  signal   {line}         an orb.events line (plugin/orb.mjs) other than "say"; "turn" starts
+                          a phone turn, "rest" ends its work
+  heard    {text}         a phone turn started on this text
+  clip     {id, url, kind, ms, env, with, delay, approve}  see Clips; this server adds url
+  reply    {summary, body, speech}  summary: the spoken line, the one that would be spoken,
+           or ""; body: the full reply or the error, up to 4000 characters; speech: whether
+           a say clip follows
+  approve  {id, ask, label, short, cut, oneline, timeout, left}
+           ask: the question to show.
+           label: the whole tool input, up to 20000 characters. Bash/Shell (the command),
+             Write, Edit, MultiEdit, NotebookEdit, WebFetch and WebSearch get "<Tool>: "
+             and a layout, then every field the layout doesn't show as key: value lines
+             (Bash's description is the one field left out). Any other tool or input gets
+             "<Tool>:" and every field as key: value lines.
+           short: "<Tool>: " and up to 110 characters of one field's first non-empty line
+             (the desk's menu title, the notification's text); "" when the input is
+             neither an object nor null.
+           In label and short, bin/glitch's vis writes each character that shows as nothing
+             or as a plain space as \\u{HEX}.
+           cut: the characters left out of label; > 0 means it can't be allowed.
+           oneline: true only for a Bash/Shell command with no field but its description,
+             cut 0, label == short, at most 40 characters with the "<Tool>: " prefix,
+             unchanged by vis, with no tab and no leading, trailing or doubled whitespace.
+             Only a oneline approval lets a notification offer Allow. bin/glitch decides
+             it; the page and the worker only read it.
+           timeout: seconds in all. left: seconds still to go when sent; events.jsonl
+             carries `since` (CLOCK_BOOTTIME s) instead, and this server works left out.
+  approved {id, answer}   allow|deny|none
+  hush     {}
+  turn     {turn}         desk|phone|null, when RT/turn.portal changes
+  hello    {state, turn, approve: [approve...], heard, reply, replay: [clip...]}  first on
+           every /api/events stream: the last state event, heard text and reply event, the
+           pending approvals and the speech clips not yet played. A new turn on either
+           portal drops the earlier turn's unplayed speech from replay.
+
+Clips. kind: cue, say, ask or aside. ms: its length. env: the orb's "say" payload
+("<hz> <v>...") or null. url: "/clips/<id>". A cue plays on arrival, over anything.
+Speech (say, ask, aside) plays one clip at a time in arrival order, and the page POSTs
+/api/played {id} when each one ends. bin/glitch waits for that, for ms + 2 s at most,
+or not at all with no page connected. A clip with `with` set starts no sooner than
+`delay` ms after clip `with` started. An ask clip belongs to approval `approve`: this
+server drops it once that is answered, and the page stops it on `approved`.
+
+Routes. Every request: Host must be ADDR:PORT, else 421. Every POST: Origin must be this
+origin, else 403. /api/* and /clips/* answer navigations (Sec-Fetch-Mode navigate or
+Sec-Fetch-Dest document) with 403, and treat a cross-site or same-site Sec-Fetch-Site as
+unpaired. Without a paired cookie, a non-public GET outside /api/ and /clips/ gets 303 to
+/pair, and any other non-public request gets 401. Errors are {error}. Every response has
+Content-Security-Policy default-src 'self'; frame-ancestors 'none', plus hashes for an
+HTML page's inline <style> and <script> blocks.
+  public  GET /pair (the pairing page), /manifest.webmanifest, /icon-*.png
+          POST /api/pair {code} -> {ok} with the cookie, or 403
+  GET  /, web/* files   the page; HTML sets the cookie again (glitch_device, HttpOnly,
+                        Secure, SameSite=Lax: a home-screen launch sends no Strict cookie)
+  GET  /plugin/orb.mjs, /plugin/orb.glsl, /sounds/<name>.wav, /clips/<id>
+  GET  /api/events      SSE: "retry: 2000", hello, the events, ": ping" every 5 s; ends
+                        once the device is unpaired
+  GET  /api/reactions   the merged reactions.json (`glitch _reactions`)
+  GET  /api/notice      {approve: [approve...], reply: {summary} | null}, for the service
+                        worker. reply is set from a reply until its say clip ends or the
+                        next turn starts; with a page connected, a reply without a say
+                        clip clears after 3 s.
+  GET  /api/push        {key}, the applicationServerKey (404 with no VAPID key)
+  POST /api/push        {endpoint} stores this device's subscription (null forgets it); 422
+                        for an endpoint outside PUSH_HOSTS, or with no VAPID key
+  POST /api/talk        a recording (Content-Type one of AUDIO, up to 50 MiB) -> {outcome}:
+                        turn, fresh ("new chat" alone), empty (nothing heard) or error;
+                        415 type, 413 empty or too big, 422 undecodable, 500 transcription failed
+  POST /api/approve     {id, allow: bool} -> {ok}; 409 not pending or allow not a bool;
+                        422 allow with cut > 0
+  POST /api/cancel      stops the running turn, whichever portal started it -> {ok}
+  POST /api/played      {id}: that clip ended; no id: hush every unplayed one -> {ok}
+
+Push. Pushes carry no payload, so the service worker asks GET /api/notice what to show.
+Each goes to every device with an endpoint. due() pushes "needs" once an approval has
+waited NEED_AFTER s, "settled" when one it pushed for ends unanswered (timed out, or its
+turn ended), and "finished" when a reply's speech goes unplayed: no page for UNHEARD_AFTER s,
+or a page that didn't play it within its length + 5 s.
+"""
+
+import argparse
+import base64
+import fcntl
+import hashlib
+import hmac
+import http.client
+import json
+import os
+import queue
+import re
+import secrets
+import socket
+import ssl
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlsplit
+
+COOKIE = "glitch_device"
+COOKIE_AGE = 34560000  # Chrome caps a cookie's lifetime at 400 days, so every HTML response sets it again
+PUBLIC = {("GET", "/pair"), ("POST", "/api/pair"),
+          ("GET", "/manifest.webmanifest"), ("GET", "/icon-192.png"), ("GET", "/icon-512.png"),
+          ("GET", "/icon-mono-192.png"), ("GET", "/icon-mono-512.png")}
+AUDIO = {"audio/webm": "matroska", "video/webm": "matroska", "audio/ogg": "ogg", "audio/mp4": "mov",
+         "audio/wav": "wav", "audio/x-wav": "wav", "audio/wave": "wav"}
+CLIP = re.compile(r"[0-9]+-(cue|say|ask|aside)\.wav")
+SOUND = re.compile(r"[a-z]+\.wav")
+PLUGIN_FILES = {"orb.mjs", "orb.glsl"}
+SPEECH = {"say", "ask", "aside"}
+MAX_UPLOAD = 50 << 20
+MAX_CONNECTIONS = 32
+MAX_UNPAIRED = 16
+MAX_UNPAIRED_PER_HOST = 8
+UNPAIRED_SECONDS = 10
+KNOWN_SECONDS = 30 * 86400
+PING_SECONDS = 5
+DEAD_PEER_MS = 20000
+PAIR_TRIES = 5
+NEED_AFTER = 5
+UNHEARD_AFTER = 3
+PUSH_HOSTS = {"fcm.googleapis.com", "updates.push.services.mozilla.com"}
+PUSH_TTL = {"needs": 300, "settled": 300, "finished": 3600}
+PUSH_URGENCY = {"needs": "high", "settled": "high", "finished": "normal"}
+TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript", ".mjs": "text/javascript",
+         ".png": "image/png", ".wav": "audio/wav", ".glsl": "text/plain; charset=utf-8",
+         ".webmanifest": "application/manifest+json"}
+APPROVE_FIELDS = ("id", "ask", "label", "short", "cut", "oneline", "timeout")
+CSP = "default-src 'self'; frame-ancestors 'none'"
+# CSP hashes cover inline blocks only; a <script src> loads under 'self'.
+INLINE = re.compile(rb"<(style|script)(\s[^>]*)?>(.*?)</\1\s*>", re.DOTALL | re.IGNORECASE)
+SRC = re.compile(rb"\ssrc\s*=", re.IGNORECASE)
+
+PAIR_PAGE = b"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width, initial-scale=1">
+<meta name=theme-color content="#0a0b0e"><meta name=color-scheme content=dark><title>glitch</title>
+<style>html,body{margin:0;height:100%;background:#0a0b0e;color:#9ba0a8;font:16px/1.4 system-ui,sans-serif}
+body{display:grid;place-items:center}form{display:grid;gap:22px;justify-items:center;text-align:center;padding:24px}
+p{margin:0;max-width:17em}#m{min-height:2.8em}
+input{width:6.2em;font:30px ui-monospace,monospace;letter-spacing:.2em;text-align:center;color:#e6e8ec;background:none;
+border:0;border-bottom:1px solid #2a2d33;border-radius:0;padding:6px 0;outline:none}input:focus{border-color:#5a5f68}input::placeholder{color:#5a5f68;letter-spacing:.05em}
+button{font:inherit;font-size:16px;color:#d8dbe0;background:none;border:1px solid #2a2d33;border-radius:99px;padding:12px 26px;min-height:48px}</style>
+<form id=f><p>Say &ldquo;pair my phone&rdquo; at the desk, then type the code it speaks.</p>
+<input id=c inputmode=numeric autocomplete=one-time-code maxlength=6 placeholder=code aria-label=code autofocus>
+<button>Pair</button><p id=m></p></form><script>
+f.onsubmit = async e => { e.preventDefault();
+  const r = await fetch("/api/pair", {method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({code: c.value})});
+  if (r.ok) location = "/"; else m.textContent = "That code didn't work. Say \\u201cpair my phone\\u201d for a new one."; };
+fetch("/api/notice").then(r => { if (r.ok) location.replace("/") });
+</script>"""
+
+
+def sha(s):
+    return hashlib.sha256(s.encode()).hexdigest()
+
+
+def read_json(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def write_atomic(path, text, mode=0o600):
+    tmp = f"{path}.{os.getpid()}.{threading.get_ident()}"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
+def shown(a):
+    left = a.get("timeout") or 0
+    if isinstance(a.get("since"), (int, float)):
+        left = max(0, round(left - (time.clock_gettime(time.CLOCK_BOOTTIME) - a["since"])))
+    return {**{k: a.get(k) for k in APPROVE_FIELDS}, "left": left}
+
+
+def frame(ev):
+    return f"event: {ev['type']}\ndata: {json.dumps(ev, separators=(',', ':'))}\n\n".encode()
+
+
+def b64u(b):
+    return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+
+
+class Vapid:
+    def __init__(self, path):
+        self.path = path
+        if not os.path.exists(path):
+            os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+            pem = subprocess.run(["openssl", "ecparam", "-name", "prime256v1", "-genkey", "-noout"],
+                                 capture_output=True, check=True).stdout
+            write_atomic(path, pem.decode())
+        der = subprocess.run(["openssl", "ec", "-in", path, "-pubout", "-outform", "DER"],
+                             capture_output=True, check=True).stdout
+        # SubjectPublicKeyInfo for P-256 ends with the 65-byte uncompressed point.
+        self.key = b64u(der[-65:])
+
+    def header(self, aud):
+        head = b64u(json.dumps({"typ": "JWT", "alg": "ES256"}).encode())
+        claims = b64u(json.dumps({"aud": aud, "exp": int(time.time()) + 12 * 3600,
+                                  "sub": "mailto:glitch@localhost"}).encode())
+        signing = f"{head}.{claims}"
+        der = subprocess.run(["openssl", "dgst", "-sha256", "-sign", self.path], input=signing.encode(),
+                             capture_output=True, check=True, timeout=10).stdout
+        # openssl gives DER SEQUENCE {INTEGER r, INTEGER s}; JWS ES256 wants r || s, 32 bytes each.
+        n = der[3]
+        r, s = der[4:4 + n], der[6 + n:6 + n + der[5 + n]]
+        sig = int.from_bytes(r).to_bytes(32) + int.from_bytes(s).to_bytes(32)
+        return f"vapid t={signing}.{b64u(sig)}, k={self.key}"
+
+
+class Portal:
+    def __init__(self, a):
+        self.a = a
+        self.ph = os.path.join(a.rt, "phone")
+        self.devices_path = os.path.join(a.data, "portal", "devices")
+        self.host = f"{a.addr}:{a.port}"
+        self.scheme = "http" if a.plain else "https"
+        self.lock = threading.Lock()
+        self.clients = set()
+        self.state = self.heard = self.reply = self.turn = None
+        self.unplayed = {}
+        self.pending = {}
+        self.asked = {}
+        self.pushed = set()
+        self.waiting = None
+        self.devices = (None, {})
+        self.dev_lock = threading.Lock()
+        self.pushes = queue.Queue()
+        self.vapid = None
+        self.push_test = os.environ.get("GLITCH_PORTAL_PUSH_TEST") if a.plain else None
+        self.pos = 0
+        self.live = False
+
+    def log(self, msg):
+        print(f"{time.strftime('%T')} {msg}", file=sys.stderr, flush=True)
+
+    def path(self, *names):
+        return os.path.join(self.ph, *names)
+
+    def turn_portal(self):
+        try:
+            with open(os.path.join(self.a.rt, "turn.portal")) as f:
+                portal, pid = f.read().split()
+            os.kill(int(pid), 0)
+            return portal
+        except (OSError, ValueError):
+            return None
+
+    def device_hashes(self):
+        try:
+            mt = os.stat(self.devices_path).st_mtime_ns
+            if self.devices[0] != mt:
+                d = read_json(self.devices_path)
+                self.devices = (mt, d if isinstance(d, dict) else {})
+        except OSError:
+            return {}
+        return self.devices[1]
+
+    def edit_device(self, key_hash, fn):
+        with self.dev_lock:
+            os.makedirs(os.path.dirname(self.devices_path), mode=0o700, exist_ok=True)
+            fd = os.open(self.devices_path + ".lock", os.O_WRONLY | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                d = dict(self.device_hashes())
+                if fn(d, key_hash) is False:
+                    return False
+                write_atomic(self.devices_path, json.dumps(d, indent=1))
+                return True
+            finally:
+                os.close(fd)
+
+    def add_device(self, key_hash, agent, pair):
+        entry = {"paired": int(time.time()), "agent": re.sub(r"[\x00-\x1f]", " ", agent)[:160]}
+
+        def fn(d, h):
+            try:
+                os.remove(pair)
+            except FileNotFoundError:
+                return False
+            d[h] = entry
+        return self.edit_device(key_hash, fn)
+
+    def set_push(self, key_hash, endpoint, only_if=None):
+        def fn(d, h):
+            if h not in d or (only_if and d[h].get("push") != only_if):
+                return False
+            d[h] = {k: v for k, v in d[h].items() if k != "push"}
+            if endpoint:
+                d[h]["push"] = endpoint
+        self.edit_device(key_hash, fn)
+
+    def push_ok(self, endpoint):
+        if not isinstance(endpoint, str) or len(endpoint) > 1024 or re.search(r"[\s\x00-\x1f]", endpoint):
+            return False
+        u = urlsplit(endpoint)
+        if u.fragment or not u.path.startswith("/"):
+            return False
+        if self.push_test and f"{u.scheme}://{u.netloc}" == self.push_test:
+            return True
+        return u.scheme == "https" and u.netloc in PUSH_HOSTS
+
+    def due(self):
+        now = time.monotonic()
+        with self.lock:
+            for i, t in list(self.asked.items()):
+                if now - t >= NEED_AFTER:
+                    del self.asked[i]
+                    self.pushed.add(i)
+                    self.pushes.put("needs")
+            w = self.waiting
+            if not w or w["pushed"] or now - w["at"] < UNHEARD_AFTER:
+                return
+            if not self.clients:
+                w["pushed"] = True
+                self.pushes.put("finished")
+            elif not w["clip"]:
+                self.waiting = None
+            elif now - w["at"] >= w["ms"] / 1000 + 5:
+                w["pushed"] = True
+                self.pushes.put("finished")
+
+    def notice(self):
+        with self.lock:
+            return {"approve": [shown(a) for a in self.pending.values()],
+                    "reply": {"summary": self.waiting["summary"]} if self.waiting else None}
+
+    def pusher(self):
+        while True:
+            kind = self.pushes.get()
+            for h, d in list(self.device_hashes().items()):
+                if isinstance(d, dict) and d.get("push") and self.vapid:
+                    try:
+                        self.push(h, d["push"], kind)
+                    except (OSError, http.client.HTTPException, subprocess.SubprocessError, ValueError, IndexError) as e:
+                        self.log(f"push {kind}: {type(e).__name__}: {e}"[:300])
+
+    def push(self, key_hash, endpoint, kind):
+        if not self.push_ok(endpoint):
+            return
+        u = urlsplit(endpoint)
+        conn = (http.client.HTTPSConnection if u.scheme == "https" else http.client.HTTPConnection)(u.netloc, timeout=10)
+        try:
+            # No body: Web Push without a payload needs no encryption (RFC 8030 5, RFC 8291).
+            conn.request("POST", u.path + (f"?{u.query}" if u.query else ""), body=b"", headers={
+                "Authorization": self.vapid.header(f"{u.scheme}://{u.netloc}"), "TTL": str(PUSH_TTL[kind]),
+                "Urgency": PUSH_URGENCY[kind], "Topic": "glitch", "Content-Length": "0"})
+            r = conn.getresponse()
+            r.read(4096)
+        finally:
+            conn.close()
+        if r.status in (404, 410):
+            self.set_push(key_hash, None, only_if=endpoint)
+            self.log(f"push subscription gone ({r.status}), forgot it")
+        elif r.status >= 300:
+            self.log(f"push {kind}: HTTP {r.status}")
+        else:
+            self.log(f"pushed {kind}")
+
+    def pair(self, code, agent):
+        path = self.path("pair")
+        with self.lock:
+            p = read_json(path)
+            if not p or p.get("expires", 0) < time.time():
+                if p:
+                    os.remove(path)
+                return None
+            if not hmac.compare_digest(sha(code), p.get("hash", "")):
+                p["tries"] = p.get("tries", 0) + 1
+                if p["tries"] >= PAIR_TRIES:
+                    os.remove(path)
+                    self.log("pairing voided after wrong codes")
+                else:
+                    write_atomic(path, json.dumps(p))
+                return None
+            key = secrets.token_urlsafe(32)
+            if not self.add_device(sha(key), agent, path):
+                return None
+            self.log("paired a phone")
+            return key
+
+    def finish(self, ids, how):
+        for i in ids:
+            self.unplayed.pop(i, None)
+            if self.waiting and self.waiting["clip"] == i:
+                self.waiting = None
+            if self.live and os.path.exists(self.path("clips", i)):
+                write_atomic(self.path("clips", i + ".played"), how)
+
+    def publish(self, ev):
+        t = ev["type"]
+        with self.lock:
+            if t == "signal" and ev.get("line") in ("turn", "rest"):
+                if self.pushed & self.pending.keys():
+                    self.pushes.put("settled")
+                self.pending.clear()
+                self.asked.clear()
+                self.pushed.clear()
+                if ev["line"] == "turn":
+                    self.unplayed.clear()
+                    self.waiting = None
+            elif t == "clip":
+                if ev.get("approve") and ev["approve"] not in self.pending:
+                    return
+                ev["url"] = "/clips/" + ev.get("id", "")
+                if ev.get("kind") in SPEECH:
+                    self.unplayed[ev["id"]] = ev
+                w = self.waiting
+                if ev.get("kind") == "say" and w and not w["clip"] and not w["pushed"]:
+                    w.update(clip=ev["id"], ms=ev.get("ms") or 0, at=time.monotonic())
+            elif t == "hush":
+                self.finish(list(self.unplayed), "hushed")
+            elif t == "state":
+                self.state = ev
+            elif t == "heard":
+                self.heard, self.reply = ev.get("text"), None
+            elif t == "reply":
+                self.reply = ev
+                if self.live:
+                    self.waiting = {"summary": ev.get("summary") or "", "at": time.monotonic(),
+                                    "clip": None, "ms": 0, "pushed": False}
+            elif t == "approve":
+                self.pending[ev.get("id")] = ev
+                if self.live:
+                    self.asked[ev.get("id")] = time.monotonic()
+                ev = {"type": t, **shown(ev)}
+            elif t == "approved":
+                self.pending.pop(ev.get("id"), None)
+                self.asked.pop(ev.get("id"), None)
+                if ev.get("id") in self.pushed and ev.get("answer") not in ("allow", "deny"):
+                    self.pushes.put("settled")
+                self.pushed.discard(ev.get("id"))
+                self.finish([i for i, c in self.unplayed.items() if c.get("approve") == ev.get("id")], "hushed")
+            msg = frame(ev)
+            for q in list(self.clients):
+                try:
+                    q.put_nowait(msg)
+                except queue.Full:
+                    self.clients.discard(q)
+
+    def hello(self):
+        turn = self.turn_portal()
+        with self.lock:
+            replay = [c for c in self.unplayed.values()
+                      if os.path.exists(self.path("clips", c["id"])) and not os.path.exists(self.path("clips", c["id"] + ".played"))]
+            return {"type": "hello", "state": self.state, "turn": turn, "approve": [shown(a) for a in self.pending.values()],
+                    "heard": self.heard, "reply": self.reply, "replay": replay}
+
+    def connect(self, q, on):
+        with self.lock:
+            if on:
+                self.clients.add(q)
+            else:
+                self.clients.discard(q)
+            if self.clients:
+                write_atomic(self.path("online"), f"{os.getpid()}\n")
+            elif os.path.exists(self.path("online")):
+                os.remove(self.path("online"))
+
+    def read_events(self, buf=b""):
+        path = self.path("events.jsonl")
+        try:
+            size = os.stat(path).st_size
+        except OSError:
+            size = 0
+        if size < self.pos:
+            self.pos, buf = 0, b""
+        if size == self.pos:
+            return buf
+        with open(path, "rb") as f:
+            f.seek(self.pos)
+            chunk = f.read(size - self.pos)
+        self.pos += len(chunk)
+        *lines, buf = (buf + chunk).split(b"\n")
+        for ln in lines:
+            try:
+                ev = json.loads(ln)
+                if isinstance(ev, dict) and isinstance(ev.get("type"), str):
+                    self.publish(ev)
+            except Exception as e:  # noqa: BLE001 - replay must get past any bad line
+                self.log(f"skipped event line: {type(e).__name__}: {e}: {ln[:120]!r}"[:300])
+        return buf
+
+    def tail(self, buf):
+        n = 0
+        while True:
+            n += 1
+            time.sleep(0.05)
+            buf = self.read_events(buf)
+            if n % 5 == 0:
+                self.watch_turn()
+                self.due()
+
+    def watch_turn(self):
+        turn = self.turn_portal()
+        if turn != self.turn:
+            self.turn = turn
+            if turn == "desk":
+                with self.lock:
+                    self.unplayed.clear()
+                    self.waiting = None
+            self.publish({"type": "turn", "turn": turn})
+
+    def glitch(self, *args, timeout=30):
+        env = dict(os.environ, GLITCH_PORTAL="phone")
+        return subprocess.run([self.a.glitch, *args], env=env, capture_output=True, text=True,
+                              timeout=timeout, stdin=subprocess.DEVNULL, check=False)
+
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    server_version = "glitch"
+    sys_version = ""
+    timeout = 60
+
+    @property
+    def p(self):
+        return self.server.portal
+
+    def log_message(self, fmt, *args):
+        pass
+
+    def handle(self):
+        self.deadline = threading.Timer(UNPAIRED_SECONDS, self.cut)
+        self.deadline.start()
+        try:
+            self.handle_one_request()
+        finally:
+            self.deadline.cancel()
+            self.server.release(self.request)
+
+    def vouch(self):
+        self.deadline.cancel()
+        self.server.release(self.request, known=(self.client_address[0], sha(self.key)))
+
+    def cut(self):
+        try:
+            # The raw socket's shutdown, not SSLSocket's: it wakes the blocked read in the handler's thread.
+            socket.socket.shutdown(self.connection, socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+    def send_response(self, code, message=None):
+        self.responded = True
+        super().send_response(code, message)
+
+    def do_GET(self):
+        self.route("GET")
+
+    def do_POST(self):
+        self.route("POST")
+
+    def route(self, method):
+        self.responded = False
+        try:
+            self.dispatch(method)
+        except (BrokenPipeError, ConnectionResetError, TimeoutError, ssl.SSLError):
+            pass
+        except Exception as e:  # noqa: BLE001 - any failure becomes a JSON error
+            self.p.log(f"{method} {urlsplit(self.path).path}: {type(e).__name__}: {e}"[:300])
+            if not self.responded:
+                self.send_json(400 if isinstance(e, ValueError) else 500, {"error": "request"})
+
+    def dispatch(self, method):
+        url = urlsplit(self.path)
+        path = url.path
+        if self.headers.get("Host") != self.p.host:
+            return self.send_json(421, {"error": "host"})
+        if method == "POST" and self.headers.get("Origin") != f"{self.p.scheme}://{self.p.host}":
+            return self.send_json(403, {"error": "origin"})
+        # Browsers send a SameSite=Lax cookie with a top-level navigation from any site.
+        api = path.startswith(("/api/", "/clips/"))
+        if api and (self.headers.get("Sec-Fetch-Mode") == "navigate" or self.headers.get("Sec-Fetch-Dest") == "document"):
+            return self.send_json(403, {"error": "navigation"})
+        cross = api and self.headers.get("Sec-Fetch-Site") in ("cross-site", "same-site")
+        self.key = None if cross else self.device_key()
+        if self.key:
+            self.vouch()
+        elif (method, path) not in PUBLIC:
+            if method == "GET" and not path.startswith(("/api/", "/clips/")):
+                return self.send(303, b"", headers={"Location": "/pair"})
+            return self.send_json(401, {"error": "unpaired"})
+        if method == "POST":
+            fn = {"/api/pair": self.post_pair, "/api/talk": self.post_talk, "/api/approve": self.post_approve,
+                  "/api/cancel": self.post_cancel, "/api/played": self.post_played, "/api/push": self.post_push}.get(path)
+            return fn() if fn else self.send_json(404, {"error": "not found"})
+        if path == "/api/events":
+            return self.events()
+        if path == "/api/reactions":
+            r = self.p.glitch("_reactions")
+            if r.returncode or not r.stdout.strip():
+                return self.send_json(500, {"error": "reactions"})
+            return self.send(200, r.stdout.encode(), "application/json")
+        if path == "/api/notice":
+            return self.send_json(200, self.p.notice(), headers={"Cache-Control": "no-store"})
+        if path == "/api/push":
+            if not self.p.vapid:
+                return self.send_json(404, {"error": "no push"})
+            return self.send_json(200, {"key": self.p.vapid.key})
+        if path == "/pair":
+            return self.send(200, PAIR_PAGE, TYPES[".html"])
+        name = path.rsplit("/", 1)[-1]
+        if path == "/clips/" + name and CLIP.fullmatch(name):
+            return self.send_file(self.p.path("clips", name), cache="private, max-age=3600")
+        if path == "/sounds/" + name and SOUND.fullmatch(name):
+            return self.send_file(self.p.path("sounds", name), cache="private, max-age=3600")
+        if path == "/plugin/" + name and name in PLUGIN_FILES:
+            return self.send_file(os.path.join(self.p.a.plugin, name))
+        return self.static(path)
+
+    def device_key(self):
+        # By hand: SimpleCookie stops at the first cookie it can't parse, which may be another service's.
+        for part in self.headers.get("Cookie", "").split(";"):
+            name, _, value = part.strip().partition("=")
+            if name == COOKIE and value and sha(value) in self.p.device_hashes():
+                return value
+        return None
+
+    def cookie(self, key):
+        return {"Set-Cookie": f"{COOKIE}={key}; Path=/; Max-Age={COOKIE_AGE}; HttpOnly; Secure; SameSite=Lax"}
+
+    def body(self, limit):
+        n = int(self.headers.get("Content-Length") or 0)
+        if not 0 < n <= limit:
+            return None
+        return self.rfile.read(n)
+
+    def body_json(self):
+        data = self.body(4096)
+        try:
+            v = json.loads(data or b"")
+        except ValueError:
+            return {}
+        return v if isinstance(v, dict) else {}
+
+    def post_pair(self):
+        code = str(self.body_json().get("code", "")).strip()
+        key = re.fullmatch(r"[0-9]{6}", code) and self.p.pair(code, self.headers.get("User-Agent", ""))
+        if not key:
+            return self.send_json(403, {"error": "code"})
+        self.send_json(200, {"ok": True}, headers=self.cookie(key))
+
+    def post_talk(self):
+        fmt = AUDIO.get(self.headers.get("Content-Type", "").split(";")[0].strip().lower())
+        if not fmt:
+            return self.send_json(415, {"error": "audio type"})
+        data = self.body(MAX_UPLOAD)
+        if not data:
+            return self.send_json(413, {"error": "size"})
+        t0 = time.monotonic()
+        with tempfile.TemporaryDirectory(dir=self.p.ph) as d:
+            src, wav = os.path.join(d, "in"), os.path.join(d, "in.wav")
+            with open(src, "wb") as f:
+                f.write(data)
+            r = subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", "-f", fmt, "-i", src,
+                                "-t", str(self.p.a.max_seconds), "-vn", "-ar", "16000", "-ac", "1",
+                                "-c:a", "pcm_s16le", "-y", wav], capture_output=True, timeout=60, check=False)
+            if r.returncode or not os.path.isfile(wav):
+                self.p.log(f"ffmpeg: {r.stderr.decode(errors='replace').strip()[:300]}")
+                return self.send_json(422, {"error": "audio"})
+            ms = max(0, os.path.getsize(wav) - 44) * 1000 // 32000
+            t1 = time.monotonic()
+            r = subprocess.run(["voxtype", "-q", "transcribe", wav], capture_output=True, text=True,
+                               timeout=30 + 2 * ms / 1000, check=False)
+            if r.returncode:
+                self.p.log(f"voxtype: {r.stderr.strip()[-300:]}")
+                return self.send_json(500, {"error": "transcribe"})
+        # voxtype prints a header, a blank line, then the text.
+        text = " ".join(r.stdout.split("\n\n", 1)[1].split()) if "\n\n" in r.stdout else ""
+        self.p.log(f"heard {ms} ms of audio: convert {t1 - t0:.2f}s, transcribe {time.monotonic() - t1:.2f}s")
+        out = self.p.glitch("_heard", text, str(ms)).stdout.split()
+        self.send_json(200, {"outcome": out[-1] if out else "error"})
+
+    def post_approve(self):
+        b = self.body_json()
+        ident = str(b.get("id", ""))
+        with self.p.lock:
+            if ident not in self.p.pending or not isinstance(b.get("allow"), bool):
+                return self.send_json(409, {"error": "stale"})
+            if b["allow"] and self.p.pending[ident].get("cut") != 0:
+                return self.send_json(422, {"error": "cut"})
+            write_atomic(self.p.path(f"approve.{ident}"), "allow" if b["allow"] else "deny")
+            self.p.pending.pop(ident)
+            self.p.asked.pop(ident, None)
+            self.p.pushed.discard(ident)
+        self.send_json(200, {"ok": True})
+
+    def post_cancel(self):
+        self.p.glitch("cancel")
+        self.send_json(200, {"ok": True})
+
+    def post_played(self):
+        ident = str(self.body_json().get("id", ""))
+        with self.p.lock:
+            if not ident:
+                self.p.finish(list(self.p.unplayed), "hushed")
+            elif CLIP.fullmatch(ident):
+                self.p.finish([ident], "played")
+        self.send_json(200, {"ok": True})
+
+    def post_push(self):
+        endpoint = self.body_json().get("endpoint")
+        if endpoint is not None and not (self.p.vapid and self.p.push_ok(endpoint)):
+            host = urlsplit(endpoint).netloc if isinstance(endpoint, str) else type(endpoint).__name__
+            self.p.log(f"refused a push endpoint at {host[:80]!r}: not a known push service")
+            return self.send_json(422, {"error": "endpoint"})
+        self.p.set_push(sha(self.key), endpoint)
+        self.send_json(200, {"ok": True})
+
+    def events(self):
+        q = queue.Queue(maxsize=2000)
+        # A phone that leaves the LAN sends no reset: unacknowledged pings end the stream instead.
+        self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT, DEAD_PEER_MS)
+        self.p.connect(q, True)
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(b"retry: 2000\n\n" + frame(self.p.hello()))
+            self.wfile.flush()
+            while True:
+                try:
+                    msg = q.get(timeout=PING_SECONDS)
+                except queue.Empty:
+                    msg = b": ping\n\n"
+                if q not in self.p.clients or not self.device_key():
+                    return
+                self.wfile.write(msg)
+                self.wfile.flush()
+        finally:
+            self.p.connect(q, False)
+
+    def static(self, path):
+        root = os.path.realpath(self.p.a.web)
+        rel = "index.html" if path == "/" else path.lstrip("/")
+        f = os.path.realpath(os.path.join(root, rel))
+        if not f.startswith(root + os.sep) or not os.path.isfile(f):
+            return self.send_json(404, {"error": "not found"})
+        self.send_file(f, headers=self.cookie(self.key) if f.endswith(".html") else None)
+
+    def send_file(self, f, cache="no-cache", headers=None):
+        try:
+            with open(f, "rb") as fh:
+                data = fh.read()
+        except OSError:
+            return self.send_json(404, {"error": "not found"})
+        self.send(200, data, TYPES.get(os.path.splitext(f)[1], "application/octet-stream"),
+                  {"Cache-Control": cache, **(headers or {})})
+
+    def send_json(self, code, obj, headers=None):
+        self.send(code, json.dumps(obj).encode(), "application/json", headers)
+
+    def send(self, code, data, ctype="text/plain", headers=None):
+        csp = CSP
+        if ctype.startswith("text/html"):
+            src = {}
+            for tag, attrs, body in INLINE.findall(data):
+                if SRC.search(attrs):
+                    continue
+                # Browsers hash the block after turning CRLF and CR into LF.
+                body = body.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+                src.setdefault(tag.decode().lower(), []).append(
+                    f"'sha256-{base64.b64encode(hashlib.sha256(body).digest()).decode()}'")
+            csp += "".join(f"; {tag}-src 'self' {' '.join(h)}" for tag, h in src.items())
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Security-Policy", csp)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Frame-Options", "DENY")
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(data)
+
+
+class Server(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
+        self.guard = threading.Lock()
+        self.hosts = {}
+        self.loose = {}
+        self.known = {}
+
+    def is_known(self, host):
+        seen, device = self.known.get(host, (None, None))
+        if seen is None:
+            return False
+        if time.clock_gettime(time.CLOCK_BOOTTIME) - seen > KNOWN_SECONDS or device not in self.portal.device_hashes():
+            del self.known[host]
+            return False
+        return True
+
+    def admit(self, request, host):
+        with self.guard:
+            known = self.is_known(host)
+            if self.hosts.get(host, 0) >= MAX_UNPAIRED_PER_HOST:
+                return False
+            if not known and sum(1 for _, k in self.loose.values() if not k) >= MAX_UNPAIRED:
+                return False
+            self.hosts[host] = self.hosts.get(host, 0) + 1
+            self.loose[request] = (host, known)
+            return True
+
+    def release(self, request, known=None):
+        with self.guard:
+            host, _ = self.loose.pop(request, (None, None))
+            if host:
+                self.hosts[host] -= 1
+                if not self.hosts[host]:
+                    del self.hosts[host]
+            if known:
+                self.known[known[0]] = (time.clock_gettime(time.CLOCK_BOOTTIME), known[1])
+                if len(self.known) > 256:
+                    del self.known[min(self.known, key=lambda h: self.known[h][0])]
+
+    def process_request(self, request, client_address):
+        if not self.admit(request, client_address[0]):
+            return self.shutdown_request(request)
+        if not self.slots.acquire(blocking=False):
+            self.release(request)
+            return self.shutdown_request(request)
+        super().process_request(request, client_address)
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.slots.release()
+
+    def handle_error(self, request, client_address):
+        self.portal.log(f"{client_address[0]}: {sys.exc_info()[1]!r}"[:200])
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    for k in ("addr", "rt", "data", "glitch", "web", "plugin"):
+        ap.add_argument("--" + k, required=True)
+    ap.add_argument("--port", type=int, default=8443)
+    ap.add_argument("--cert")
+    ap.add_argument("--key")
+    ap.add_argument("--plain", action="store_true")
+    ap.add_argument("--max-seconds", type=int, default=600)
+    a = ap.parse_args()
+    if not a.plain and not (a.cert and a.key):
+        ap.error("--cert and --key, or --plain")
+    portal = Portal(a)
+    os.makedirs(portal.path("clips"), exist_ok=True)
+    if os.path.exists(portal.path("online")):
+        os.remove(portal.path("online"))
+    buf = portal.read_events()
+    portal.live = True
+    try:
+        portal.vapid = Vapid(os.path.join(a.data, "portal", "vapid.pem"))
+    except (OSError, subprocess.CalledProcessError) as e:
+        portal.log(f"no push: {e}"[:300])
+    try:
+        srv = Server((a.addr, a.port), Handler)
+        if not a.plain:
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+            ctx.load_cert_chain(a.cert, a.key)
+            srv.socket = ctx.wrap_socket(srv.socket, server_side=True, do_handshake_on_connect=False)
+    except (OSError, ssl.SSLError) as e:
+        sys.exit(f"glitch portal: {a.addr}:{a.port}: {e}")
+    srv.portal = portal
+    threading.Thread(target=portal.tail, args=(buf,), daemon=True).start()
+    threading.Thread(target=portal.pusher, daemon=True).start()
+    portal.log(f"portal on {portal.scheme}://{portal.host}")
+    srv.serve_forever()
+
+
+if __name__ == "__main__":
+    main()
