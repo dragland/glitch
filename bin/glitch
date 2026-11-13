@@ -14,6 +14,7 @@
 #   glitch pair            speak a code that pairs a phone with the portal (2 minutes)
 #   glitch unpair          forget every paired phone
 #   glitch portal          run the phone portal's server
+#   glitch cert [--renew]  make the portal's certificate, and the CA file the phone installs
 #
 # Defaults in <repo>/config, overrides in ~/.config/glitch, downloads in
 # ~/.local/share/glitch, live state in $XDG_RUNTIME_DIR/glitch.
@@ -890,6 +891,65 @@ cmd_unpair() {
   say_aside "Done, your phone is unpaired."
 }
 
+# A one-use CA signs the portal's certificate (ECDSA P-256, IP SAN), then its key
+# is destroyed: Chrome on Android doesn't enforce name constraints on
+# user-installed roots, so the root the phone trusts must never sign again.
+# Chrome caps lifetimes only under publicly trusted roots, so neither expires
+# (RFC 5280's 99991231235959Z); notBefore is a day back for a phone clock that
+# runs slow. Android installs a "CA certificate" only with CA:TRUE.
+cmd_cert() {
+  local ca="$DATA/portal/glitch-ca.crt" tmp from to=99991231235959Z fp d
+  if [[ ! $PORTAL_ADDR =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+    echo "glitch cert: set PORTAL_ADDR (this machine's LAN address, e.g. 192.168.1.12) in $USER_CONF/glitch.conf" >&2
+    return 1
+  fi
+  if [[ $1 != --renew && (-e $PORTAL_CERT || -e $ca) ]]; then
+    echo "glitch cert: the phone already trusts $ca; a new one stops that until it's installed again." >&2
+    echo "  Make a new one with: glitch cert --renew" >&2
+    return 1
+  fi
+  # tmpfs, so the CA key never reaches the disk (shred can't erase a btrfs file)
+  tmp=$(mktemp -d -p "$RT") || return 1
+  from=$(date -u -d '-1 day' +%Y%m%d%H%M%SZ)
+  if ! (
+    set -e
+    cd "$tmp"
+    printf '%s\n' '[req]' 'distinguished_name = dn' '[dn]' \
+      '[ca]' 'basicConstraints = critical, CA:TRUE, pathlen:0' 'keyUsage = critical, keyCertSign' 'subjectKeyIdentifier = hash' \
+      '[leaf]' 'basicConstraints = critical, CA:FALSE' 'keyUsage = critical, digitalSignature' 'extendedKeyUsage = serverAuth' \
+      "subjectAltName = IP:$PORTAL_ADDR" 'subjectKeyIdentifier = hash' 'authorityKeyIdentifier = keyid' >x509.cnf
+    openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out ca.key
+    openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out key.pem
+    openssl req -x509 -new -config x509.cnf -extensions ca -key ca.key -subj "/CN=glitch portal $PORTAL_ADDR (key destroyed)" \
+      -sha256 -not_before "$from" -not_after "$to" -out ca.pem
+    openssl req -new -config x509.cnf -key key.pem -subj "/CN=$PORTAL_ADDR" -out leaf.csr
+    openssl x509 -req -in leaf.csr -CA ca.pem -CAkey ca.key -extfile x509.cnf -extensions leaf \
+      -sha256 -not_before "$from" -not_after "$to" -out cert.pem 2>/dev/null
+    shred -u ca.key
+    openssl verify -x509_strict -purpose sslserver -CAfile ca.pem cert.pem >/dev/null
+    openssl x509 -in ca.pem -outform DER -out ca.crt
+  ); then
+    rm -rf "$tmp"
+    echo "glitch cert: openssl failed" >&2
+    return 1
+  fi
+  for d in "$DATA/portal" "$(dirname "$PORTAL_CERT")" "$(dirname "$PORTAL_KEY")"; do mkdir -p "$d" && chmod 700 "$d"; done
+  install -m 600 "$tmp/key.pem" "$PORTAL_KEY.new" && mv "$PORTAL_KEY.new" "$PORTAL_KEY" &&
+    install -m 644 "$tmp/cert.pem" "$PORTAL_CERT.new" && mv "$PORTAL_CERT.new" "$PORTAL_CERT" &&
+    install -m 644 "$tmp/ca.crt" "$ca.new" && mv "$ca.new" "$ca"
+  d=$?
+  rm -rf "$tmp"
+  ((d == 0)) || { echo "glitch cert: couldn't write the certificate" >&2; return 1; }
+  fp=$(openssl x509 -inform DER -in "$ca" -noout -fingerprint -sha256 | cut -d= -f2)
+  log "portal certificate made for $PORTAL_ADDR (CA $fp)"
+  echo "CA file for the phone: $ca"
+  echo "SHA-256: $fp"
+  echo "On the phone: Settings > Security > Encryption & credentials > Install a certificate > CA certificate,"
+  echo "pick this file and check the fingerprint. It vouches only for $PORTAL_ADDR, and its key is gone."
+  [[ $1 == --renew ]] && echo "The portal serves the new certificate once restarted: systemctl --user restart glitch-portal"
+  return 0
+}
+
 # Exits 78 (EX_CONFIG, which the unit doesn't restart on) without PORTAL_ADDR
 # or the certificate. GLITCH_PORTAL_PLAIN=1 serves plain HTTP on 127.0.0.1 (tests only).
 cmd_portal() {
@@ -921,6 +981,7 @@ _heard) heard "$2" "${3:-false}" "$(speech_stats "${4:-0}" "$2")" ;;
 pair) cmd_pair ;;
 unpair) cmd_unpair ;;
 portal) cmd_portal ;;
+cert) cmd_cert "${2:-}" ;;
 _live) cmd_live ;;
 _expire) close_card ;;
 _approve) cmd_approve ;;
@@ -934,5 +995,5 @@ say)
   say_aside "$@"
   ;;
 state) cat "$RT/state.json" 2>/dev/null ;;
-*) sed -n '3,16p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+*) sed -n '3,17p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

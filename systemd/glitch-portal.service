@@ -4,6 +4,8 @@ Description=glitch portal: the phone page (HTTPS on the LAN) for the same voice 
 PartOf=graphical-session.target
 After=graphical-session.target
 ConditionEnvironment=WAYLAND_DISPLAY
+# Off until the owner opts in: glitch cert writes this (and needs PORTAL_ADDR).
+ConditionPathExists=%h/.local/share/glitch/portal/glitch-ca.crt
 
 [Service]
 ExecStart=%h/.local/bin/glitch portal
