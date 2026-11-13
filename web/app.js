@@ -5,11 +5,12 @@ const $ = id => document.getElementById(id)
 const canvas = $("orb"), textEl = $("text"), saidEl = $("said"), lineEl = $("line"), hintEl = $("hint"), moreEl = $("more")
 const spokenEl = $("spoken"), askEl = $("ask"), qtEl = $("qt"), nEl = $("n"), labelEl = $("label"), drainEl = $("drain")
 const allowEl = $("allow"), denyEl = $("deny"), stopEl = $("stop")
-const awayEl = $("away"), offerEl = $("offer"), yesEl = $("yes"), noEl = $("no")
+const installEl = $("install"), awayEl = $("away"), offerEl = $("offer"), yesEl = $("yes"), noEl = $("no")
 const TAP_MS = 250, HANDOFF_MS = 30000, RELOAD_MS = 30000, ARM_MS = 400, UNHEARD_MS = 4000, CLOCK_AFTER = 10
 const WORK = new Set(["thinking", "tool"])
 // The orb's centre as a fraction of the height, its resting radius in stage px, and in those radii
 // the talk target and the line past which a held recording is discarded.
+let installer = null
 const CY = 0.38, ORB_R = 135, TARGET = 1.5, AWAY = 2
 // Seconds per word for his words, how early a spoken word shows, the envelope level that counts
 // as voiced, the longest quiet inside speech that doesn't pause the words, and how far a pause
@@ -91,7 +92,7 @@ const opts = {
   persist: true
 }
 const fit = () => {
-  opts.scale = Math.min(innerWidth, innerHeight * 0.75) / 590
+  opts.scale = Math.min(innerWidth, innerHeight * 0.75) / 520
   document.documentElement.style.setProperty("--top", `${CY * innerHeight + TARGET * ORB_R * opts.scale}px`)
 }
 fit()
@@ -197,6 +198,7 @@ function render() {
   if (update()) return
   const a = offline ? null : approvals[0]
   awayEl.hidden = !offline
+  installEl.hidden = !installer || offline || !!a || !!turn || local === "listening" || offering
   offerEl.hidden = !offering || offline || !!a
   stopEl.hidden = !turn || offline || !!a || local === "listening"
   card(a)
@@ -605,10 +607,12 @@ setInterval(() => { if (local === "listening" || turn) render() }, 250)
 
 // --- install: Chrome only raises its own prompt from a tap ---
 
-let installer = null
-addEventListener("beforeinstallprompt", e => { e.preventDefault(); installer = e; $("install").hidden = false })
-addEventListener("appinstalled", () => { $("install").hidden = true })
-$("install").addEventListener("click", () => { $("install").hidden = true; installer?.prompt() })
+addEventListener("beforeinstallprompt", e => {
+  e.preventDefault()
+  if (!matchMedia("(display-mode: standalone)").matches) { installer = e; render() }
+})
+addEventListener("appinstalled", () => { installer = null; render() })
+installEl.addEventListener("click", () => { installer?.prompt(); installer = null; render() })
 
 // --- notifications ---
 

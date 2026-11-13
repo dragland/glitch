@@ -56,12 +56,11 @@
   #ask .row button { flex: 1; padding: 14px 0 }
   #allow { border-color: #d8dbe0; background: #d8dbe0; color: #0a0b0e }
   #allow:active { background: #fff }
-  #away a { display: inline-block; color: #d8dbe0; text-decoration: none; border: 1px solid #2a2d33; border-radius: 99px;
+  #away a, #install { display: inline-block; color: #d8dbe0; text-decoration: none; border: 1px solid #2a2d33; border-radius: 99px;
     padding: 12px 26px }
-  #away a:active { background: #16181d }
+  #away a:active, #install:active { background: #16181d }
   #offer { font-size: .875rem; color: #9ba0a8 }
   #offer button { border: 0; padding: 12px 8px; color: #d8dbe0 }
-  #install { position: fixed; top: env(safe-area-inset-top); left: 0; border: 0; padding: 18px 20px; font-size: .8125rem; color: #9ba0a8 }
   #spoken { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%) }
   [hidden] { display: none !important }
 </style>
@@ -74,10 +73,10 @@
     <button id="stop" hidden>stop</button>
     <!-- Chrome for Android: intent:, and only to a BROWSABLE activity (Tailscale's tailscale://navigate). -->
     <div id="away" hidden><a href="intent://navigate#Intent;scheme=tailscale;package=com.tailscale.ipn;S.browser_fallback_url=https%3A%2F%2Fplay.google.com%2Fstore%2Fapps%2Fdetails%3Fid%3Dcom.tailscale.ipn;end">Open Tailscale</a></div>
+    <button id="install" hidden>Add to home screen</button>
     <div id="offer" hidden>Notify you when I finish?<button id="yes">Yes</button><button id="no">No</button></div>
   </div>
 </div>
 <p id="spoken" aria-live="polite"></p>
-<button id="install" hidden>install</button>
 <script type="module" src="/app.js"></script>
 </html>
