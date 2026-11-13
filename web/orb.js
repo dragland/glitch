@@ -35,8 +35,8 @@ async function fetchShader() {
 }
 
 export async function createOrbView(canvas, opts = {}) {
-  const body = opts.shader || await fetchShader()
-  const gl = canvas.getContext("webgl2", { alpha: true, premultipliedAlpha: true, antialias: false, preserveDrawingBuffer: !!opts.preserve })
+  const body = await fetchShader()
+  const gl = canvas.getContext("webgl2", { alpha: true, premultipliedAlpha: true, antialias: false })
   if (!gl) throw new Error("WebGL2 is not available")
   let prog = null, buf = null, locs = {}
 
@@ -62,7 +62,7 @@ export async function createOrbView(canvas, opts = {}) {
   const loc = name => name in locs ? locs[name] : (locs[name] = gl.getUniformLocation(prog, name))
 
   const now = opts.now || (() => performance.now() / 1000)
-  const core = createOrb({ now })
+  const core = createOrb({ now, persist: opts.persist })
   let frame = core.frame(), raf = 0, last = 0, running = false, lost = false, waker = 0, wakeAt = -1
 
   function uniform(name, v) {
@@ -153,12 +153,9 @@ export async function createOrbView(canvas, opts = {}) {
     mic(level) { core.mic(level) },
     cursor(x, y) { core.cursor(x, y) },
     reduceMotion(on) { core.reduceMotion(on); fresh() },
-    colors(c) { core.colors(c); fresh() },
     hide() { core.hide(); fresh() },
     start() { running = true; resume() },
     stop() { running = false; cancelAnimationFrame(raf); raf = 0 },
-    step(dt) { frame = core.step(dt); arm(); return frame },
-    render,
     get frame() { return frame },
     destroy() {
       this.stop()

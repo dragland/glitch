@@ -4,6 +4,7 @@ import { createOrbView } from "./orb.js"
 const $ = id => document.getElementById(id)
 const canvas = $("orb"), textEl = $("text"), heardEl = $("heard"), lineEl = $("line"), bodyEl = $("body")
 const askEl = $("ask"), labelEl = $("label"), allowEl = $("allow"), denyEl = $("deny"), cancelEl = $("cancel")
+const awayEl = $("away"), offerEl = $("offer"), yesEl = $("yes"), noEl = $("no")
 const TAP_MS = 250
 const WORK = new Set(["thinking", "tool"])
 
@@ -16,14 +17,18 @@ async function api(path, body) {
   return r
 }
 
-let reactions = {}
+navigator.serviceWorker?.register("/sw.js").catch(() => {})
+
+let reactions = {}, offline = false
 {
-  const r = await fetch("/api/reactions")
-  if (r.status === 401) pair()
-  else if (r.ok) reactions = await r.json()
+  const r = await fetch("/api/reactions").catch(() => null)
+  if (r?.status === 401) pair()
+  else if (r?.ok) reactions = await r.json()
+  offline = !r || r.headers.get("X-Glitch-Saved") === "1"
 }
 const listenLook = () => reactions.listening || null
 const restLook = () => reactions.mood?.calm || null
+const awayLook = () => reactions.mood?.sorry || null
 
 // --- audio: one context, unlocked by the first press, so later clips need no gesture ---
 
@@ -64,27 +69,25 @@ const opts = {
     for (const v of samples) peak = Math.max(peak, Math.abs(v))
     orb.mic(Math.min(1, peak))
   },
-  // The orb fades out after a resting state's linger (plugin/orb.mjs); the page keeps it.
-  onFrame(f) { if (!f.shown) rest() }
+  persist: true
 }
 const fit = () => { opts.scale = Math.min(innerWidth, innerHeight * 0.75) / 590 }
 fit()
 addEventListener("resize", fit)
 let server = null, local = null, turn = null, approvals = []
-let heard = "", reply = null, note = "", awaiting = 0
+let heard = "", reply = null, note = "", awaiting = 0, offering = false
 let orb
 try { orb = await createOrbView(canvas, opts) } catch (e) {
   if (/HTTP 401/.test(e.message)) pair()
   note = "Can't draw the orb here"
-  orb = { set() {}, event() {}, mic() {}, reduceMotion() {}, start() {}, stop() {}, frame: { shown: true } }
+  orb = { set() {}, event() {}, mic() {}, reduceMotion() {}, start() {}, stop() {} }
 }
 const motion = matchMedia("(prefers-reduced-motion: reduce)")
 orb.reduceMotion(motion.matches)
 motion.addEventListener("change", () => orb.reduceMotion(motion.matches))
 
 function rest() {
-  if (server?.state === "needs_you" && approvals.length) orb.set({ state: "needs_you", reaction: server.reaction })
-  else orb.set({ state: "ready", reaction: restLook() })
+  orb.set({ state: "idle", reaction: offline ? awayLook() : restLook() })
 }
 
 function show() {
@@ -95,6 +98,15 @@ function show() {
 }
 
 function render() {
+  awayEl.hidden = !offline
+  offerEl.hidden = !offering || offline || approvals.length > 0
+  if (offline) {
+    heardEl.textContent = ""
+    lineEl.textContent = "Can't reach home"
+    textEl.classList.remove("dim", "body")
+    bodyEl.hidden = askEl.hidden = cancelEl.hidden = true
+    return wake()
+  }
   const s = server?.state, d = server?.detail || ""
   const detail = (WORK.has(s) || s === "idle") && d !== heard ? d : ""
   heardEl.textContent = heard
@@ -214,10 +226,45 @@ cancelEl.addEventListener("click", () => { unlock(); api("/api/cancel").catch(()
 
 // --- events ---
 
+const LOST_MS = 3000, PROBE_MS = 3000
+let es = null, lost = 0, probing = 0, synced = false
+
+function goOffline() {
+  clearTimeout(lost)
+  lost = 0
+  es?.close()
+  es = null
+  if (!offline) {
+    offline = true
+    server = turn = null
+    approvals = []
+    show()
+  }
+  probeSoon(PROBE_MS)
+}
+
+function probeSoon(ms) {
+  clearTimeout(probing)
+  probing = setTimeout(probe, ms)
+}
+
+async function probe() {
+  clearTimeout(probing)
+  const r = await fetch("/api/notice", { cache: "no-store", signal: AbortSignal.timeout(4000) }).catch(() => null)
+  if (r?.status === 401) return pair()
+  if (r?.ok) { if (!es) connect() }
+  else if (offline || !es) probeSoon(PROBE_MS)
+}
+
 function connect() {
-  const es = new EventSource("/api/events")
-  const on = (type, fn) => es.addEventListener(type, e => { fn(JSON.parse(e.data)); render() })
+  const me = es = new EventSource("/api/events")
+  const on = (type, fn) => me.addEventListener(type, e => { fn(JSON.parse(e.data)); render() })
   on("hello", h => {
+    clearTimeout(lost)
+    lost = 0
+    offline = false
+    if (!document.hidden) clearNotices()
+    if (!synced && globalThis.Notification?.permission === "granted") { synced = true; subscribe().catch(() => {}) }
     turn = h.turn
     server = h.turn === "phone" ? h.state : null
     approvals = h.approve || []
@@ -226,7 +273,10 @@ function connect() {
     for (const c of h.replay || []) clip(c)
     if (!local) show()
   })
-  on("turn", m => { turn = m.turn })
+  on("turn", m => {
+    if (turn === "phone" && !m.turn && canOffer()) offering = true
+    turn = m.turn
+  })
   on("state", m => {
     server = m
     if (awaiting) { clearTimeout(awaiting); awaiting = 0; local = null }
@@ -242,16 +292,52 @@ function connect() {
   on("approve", m => { if (!approvals.some(a => a.id === m.id)) approvals.push(m) })
   on("approved", m => answered(m.id))
   on("hush", () => hush(false))
-  es.onerror = () => {
-    if (es.readyState !== EventSource.CLOSED) return
-    setTimeout(async () => {
-      const r = await fetch("/api/reactions").catch(() => null)
-      if (r?.status === 401) pair()
-      else connect()
-    }, 2000)
+  me.onerror = () => {
+    if (es !== me) return
+    lost ||= setTimeout(goOffline, LOST_MS)
+    if (me.readyState === EventSource.CLOSED) { es = null; probeSoon(500) }
   }
 }
-connect()
+if (offline) goOffline()
+else connect()
+
+addEventListener("online", () => { if (offline || !es) probe() })
+
+// --- notifications ---
+
+const canOffer = () => "PushManager" in window && !!navigator.serviceWorker?.controller &&
+  Notification.permission === "default" && !localStorage.getItem("glitch.push")
+
+function clearNotices() {
+  navigator.serviceWorker?.getRegistration().then(r => r?.getNotifications({ tag: "glitch" }))
+    .then(ns => ns?.forEach(n => n.close()), () => {})
+}
+
+const bytes = b64 => Uint8Array.from(atob(b64.replace(/-/g, "+").replace(/_/g, "/")), c => c.charCodeAt(0))
+
+async function subscribe() {
+  const reg = await navigator.serviceWorker.ready
+  const r = await fetch("/api/push")
+  if (!r.ok) return
+  const key = bytes((await r.json()).key)
+  let sub = await reg.pushManager.getSubscription()
+  const old = sub && new Uint8Array(sub.options.applicationServerKey || [])
+  if (sub && old.join() !== key.join()) { await sub.unsubscribe(); sub = null }
+  sub ||= await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key })
+  await api("/api/push", { endpoint: sub.endpoint })
+}
+
+yesEl.addEventListener("click", async () => {
+  offering = false
+  render()
+  if (await Notification.requestPermission() === "granted") subscribe().catch(() => {})
+  else localStorage.setItem("glitch.push", "no")
+})
+noEl.addEventListener("click", () => {
+  offering = false
+  localStorage.setItem("glitch.push", "no")
+  render()
+})
 
 // --- the mic: kept open while the page is visible, so a press catches the first syllable ---
 
@@ -311,6 +397,8 @@ canvas.addEventListener("contextmenu", e => e.preventDefault())
 canvas.addEventListener("pointerdown", e => {
   if (press || e.button > 0) return
   canvas.setPointerCapture(e.pointerId)
+  offering = false
+  if (offline) { unlock(); press = { id: e.pointerId, away: true }; return render() }
   const first = !unlocked
   unlock()
   note = ""
@@ -329,6 +417,7 @@ function release(e) {
   if (!p || (e && e.pointerId !== p.id)) return
   if (e) unlock()
   press = null
+  if (p.away) return void ac.resume().then(() => chime("unsure"), () => {})
   clearTimeout(p.timer)
   if (!p.t) return
   const rec = p.rec
@@ -391,8 +480,9 @@ document.addEventListener("visibilitychange", () => {
     dropMic()
     orb.stop()
   } else {
-    if (!orb.frame.shown) show()
     orb.start()
+    if (offline || !es) probe()
+    else clearNotices()
   }
   wake()
 })

@@ -17,11 +17,13 @@
 //        say <hz> <v>...  the loudness envelope of the line about to be spoken (v = 0..99)
 //        hush             speech stopped early
 //   Hosts also feed the mic's linear sample peak while listening, and may feed
-//   the cursor (percent of the screen), reduced motion, and colours that replace
-//   the reaction's palette ({color1, color2, bg} as "#rrggbb", or null).
+//   the cursor (percent of the screen) and reduced motion.
 //
-// createOrb({ now }) takes the host's clock in seconds; the hide deadlines run on
-// it, so they hold while no frames are drawn. Without it they run on step time.
+// createOrb({ now, persist }): now is the host's clock in seconds; the hide
+// deadlines run on it, so they hold while no frames are drawn. Without it they
+// run on step time. With persist, the orb never hides on its own (only hide()
+// hides it): it shows from the first set, idle included, and after a resting
+// state it keeps that state's look.
 //
 // Units are the orb's CSS px: the stage is stage.size square and the orb's
 // centre sits stage.orbY above its bottom edge. A frame (step/frame) holds:
@@ -40,7 +42,7 @@
 export const stage = { size: 760, orbY: 260 }
 export const aa = (k, dpr) => 1 / (k * dpr)
 
-export const palettes = {
+const palettes = {
   electric: { color1: "#00f0ff", color2: "#ff0055", bg: "#08080c" },
   sunset:   { color1: "#ff7b54", color2: "#ffb26b", bg: "#1a0b12" },
   ocean:    { color1: "#00a8cc", color2: "#27496d", bg: "#011520" },
@@ -49,7 +51,7 @@ export const palettes = {
   mono:     { color1: "#ffffff", color2: "#888888", bg: "#0a0a0a" },
   mint:     { color1: "#4de3a4", color2: "#17877a", bg: "#04130f" }
 }
-export const patterns = { rings: 0, checker: 1, waves: 2, dots: 3, stripes: 4, noise: 5, fine: 6 }
+const patterns = { rings: 0, checker: 1, waves: 2, dots: 3, stripes: 4, noise: 5, fine: 6 }
 const motionSeconds = { bounce: 1, orbit: 4, wobble: 2, breathe: 4, jitter: 0.2, still: 1 }
 const lingerSeconds = { done: 4.5, needs_you: 25, error: 9, idle: 1.2 }
 const PAD = 190
@@ -118,7 +120,7 @@ const kick = (u, freq, damp) => u <= 0 ? 0 : Math.exp(-damp * u) * Math.sin(freq
 export function createOrb(opts = {}) {
   let mode = "idle", shown = false
   let paletteName = "electric", pattern = "rings", prevPattern = "rings", motion = "breathe", mood = "curious"
-  let energy = 0.5, activity = 0, override = null, reduce = false
+  let energy = 0.5, activity = 0, reduce = false
 
   let clock = 0, wall = 0, lastStep = 0, hideAt = -1, fadeEnd = -1
   const now = opts.now || (() => wall)
@@ -138,7 +140,8 @@ export function createOrb(opts = {}) {
   const lidBlink = { t: -1, from: 1, fresh: false }
   let lid = 1
 
-  const pal = () => override || palettes[paletteName] || palettes.electric
+  const persist = !!opts.persist
+  const pal = () => palettes[paletteName] || palettes.electric
   const color1 = tween(rgba(pal().color1)), color2 = tween(rgba(pal().color2)), bg = tween(rgba(pal().bg))
   color1.key = pal().color1; color2.key = pal().color2; bg.key = pal().bg
   const patMix = tween(0)
@@ -205,7 +208,7 @@ export function createOrb(opts = {}) {
       try { m = JSON.parse(payload || "{}") } catch (e) { return }
     }
     const s = m.state || "idle"
-    if (s === "idle" && !shown) return
+    if (s === "idle" && !shown && !persist) return
     const r = m.reaction || {}
     if (r.palette) paletteName = r.palette
     if (r.pattern && r.pattern !== pattern) {
@@ -225,7 +228,7 @@ export function createOrb(opts = {}) {
     mode = s
     shown = true
     const linger = lingerSeconds[s] || 0
-    hideAt = linger > 0 ? t + linger : -1
+    hideAt = linger > 0 && !persist ? t + linger : -1
     derive()
   }
 
@@ -283,7 +286,6 @@ export function createOrb(opts = {}) {
   function hide() { conceal(now()); mode = "idle"; derive() }
   function mic(level) { micRaw = Number(level) || 0 }
   function reduceMotion(on) { reduce = !!on; derive() }
-  function colors(c) { override = c && c.color1 && c.color2 && c.bg ? c : null; derive() }
 
   function cursor(px, py) {
     if (!Number.isFinite(px) || !Number.isFinite(py)) return
@@ -462,7 +464,7 @@ export function createOrb(opts = {}) {
       u["moon" + i] = [Math.cos(a) * orbit, Math.sin(a) * orbit, out, home]
     }
     return {
-      visible: visible(), wakeAt: !visible() ? -1 : shown ? hideAt : fadeEnd, shown, mode, listening: shown && mode === "listening",
+      visible: visible(), wakeAt: !visible() ? -1 : shown ? hideAt : fadeEnd, shown, listening: shown && mode === "listening",
       opacity: opacity.v, scale: scale.v,
       sx: m.sx * creatureScale.v * gx, sy: m.sy * creatureScale.v * gy, rot: m.rot,
       x: m.x + eyeX * 0.2, y: m.y + eyeY * 0.2,
@@ -471,5 +473,5 @@ export function createOrb(opts = {}) {
     }
   }
 
-  return { set, event, hide, mic, cursor, reduceMotion, colors, step, wake, frame }
+  return { set, event, hide, mic, cursor, reduceMotion, step, wake, frame }
 }

@@ -197,6 +197,63 @@ if ((with_remote)); then
   fi
 fi
 
+step "Phone portal"
+link "$REPO/systemd/glitch-portal.service" "$CONFIG/systemd/user/glitch-portal.service"
+systemctl --user daemon-reload
+{ read -r p_addr; read -r p_port; read -r p_cert; read -r p_key; } < <(
+  set +u
+  DATA=$DATA
+  . "$REPO/config/glitch.conf"
+  [[ -f $CONFIG/glitch/glitch.conf ]] && . "$CONFIG/glitch/glitch.conf"
+  printf '%s\n' "$PORTAL_ADDR" "$PORTAL_PORT" "$PORTAL_CERT" "$PORTAL_KEY"
+)
+if [[ -z $p_addr ]]; then
+  ok "off (to use it: set PORTAL_ADDR in ~/.config/glitch/glitch.conf, run glitch cert, re-run ./install.sh)"
+elif [[ ! -f $DATA/portal/glitch-ca.crt || ! -f $p_cert || ! -f $p_key ]]; then
+  ok "off until there's a certificate: run glitch cert, install its CA file on the phone, re-run ./install.sh"
+else
+  systemctl --user enable glitch-portal.service >/dev/null 2>&1 || true
+  # Safe mid-turn: KillMode=process leaves a running phone turn alone.
+  systemctl --user restart glitch-portal.service >/dev/null 2>&1 || true
+  sleep 2
+  if systemctl --user is-active --quiet glitch-portal.service; then
+    ok "https://$p_addr:$p_port (pair a phone: glitch pair)"
+  else
+    echo "    warning: glitch-portal isn't running (journalctl --user -u glitch-portal)"
+  fi
+  # Opening the port and routing it over Tailscale need root (or the Tailscale
+  # operator), so they're the owner's to run.
+  todo=()
+  lan=$(ip -j -4 addr show 2>/dev/null | jq -r --arg a "$p_addr" \
+    '.[] | select(.ifname != "tailscale0") | .addr_info[] | select(.local == $a) | .prefixlen' | head -1)
+  if [[ -z $lan ]]; then
+    echo "    warning: $p_addr (PORTAL_ADDR) isn't an address of this machine (ip -4 addr)"
+  elif command -v ufw >/dev/null; then
+    IFS=. read -r a b c d <<<"$p_addr"
+    n=$(((a << 24 | b << 16 | c << 8 | d) & (0xffffffff << (32 - lan)) & 0xffffffff))
+    lan="$((n >> 24)).$((n >> 16 & 255)).$((n >> 8 & 255)).$((n & 255))/$lan"
+    rules=$(cat /etc/ufw/user.rules 2>/dev/null)
+    grep -q "^### tuple ### allow tcp $p_port 0\.0\.0\.0/0 any ${lan//./\\.} in\b" <<<"$rules" ||
+      todo+=("sudo ufw allow from $lan to any port $p_port proto tcp comment 'glitch portal LAN'")
+    grep -q "^### tuple ### allow tcp $p_port 0\.0\.0\.0/0 any 0\.0\.0\.0/0 in_tailscale0\b" <<<"$rules" ||
+      todo+=("sudo ufw allow in on tailscale0 to any port $p_port proto tcp comment 'glitch portal Tailscale'")
+  fi
+  if command -v tailscale >/dev/null; then
+    # --advertise-routes replaces the whole list, so repeat the routes already advertised.
+    prefs=$(tailscale debug prefs 2>/dev/null) || prefs='{"AdvertiseRoutes":["<routes it already advertises>"]}'
+    routes=$(jq -r --arg r "$p_addr/32" '.AdvertiseRoutes // [] | if index([$r]) then "" else . + [$r] | join(",") end' <<<"$prefs")
+    ts="sudo "
+    [[ $(jq -r '.OperatorUser // ""' <<<"$prefs") == "$(id -un)" ]] && ts=
+    [[ -n $routes ]] && todo+=("${ts}tailscale set --advertise-routes=$routes")
+  fi
+  if ((${#todo[@]})); then
+    echo "    to reach it from the phone, run:"
+    printf '      %s\n' "${todo[@]}"
+    [[ ${todo[*]} == *advertise-routes* ]] &&
+      echo "    then approve the $p_addr/32 route in the Tailscale admin console (Machines) and turn on Use Tailscale subnets in the phone's Tailscale app"
+  fi
+fi
+
 if ((with_desktop)); then
   step "Desktop control (screenshots, windows, clicks and keys for agents)"
   if ! command -v ydotool >/dev/null || [[ ! -w /dev/uinput ]]; then

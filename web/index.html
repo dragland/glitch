@@ -29,6 +29,12 @@
     padding: 12px 0; width: 9.5em; margin: 0 5px }
   button:active { background: #16181d }
   button:disabled { opacity: .4 }
+  #away, #offer { position: fixed; left: 0; right: 0; bottom: calc(36px + env(safe-area-inset-bottom)); text-align: center }
+  #away a { display: inline-block; color: #d8dbe0; text-decoration: none; border: 1px solid #2a2d33; border-radius: 99px;
+    padding: 12px 26px }
+  #away a:active { background: #16181d }
+  #offer { font-size: 13px; color: #50545c }
+  #offer button { width: auto; border: 0; margin: 0; padding: 12px 8px; color: #8a8f98 }
   #cancel { position: fixed; top: env(safe-area-inset-top); right: 0; width: auto; border: 0; margin: 0;
     padding: 18px 20px; font-size: 13px; color: #50545c }
   [hidden] { display: none !important }
@@ -38,5 +44,8 @@
 <div id="body" hidden></div>
 <div id="ask" hidden><p id="label"></p><button id="allow">Allow once</button><button id="deny">Deny</button></div>
 <button id="cancel" hidden>cancel</button>
+<!-- Chrome for Android: intent:, and only to a BROWSABLE activity (Tailscale's tailscale://navigate). -->
+<div id="away" hidden><a href="intent://navigate#Intent;scheme=tailscale;package=com.tailscale.ipn;S.browser_fallback_url=https%3A%2F%2Fplay.google.com%2Fstore%2Fapps%2Fdetails%3Fid%3Dcom.tailscale.ipn;end">Open Tailscale</a></div>
+<div id="offer" hidden>Notify you when I finish?<button id="yes">Yes</button><button id="no">No</button></div>
 <script type="module" src="/app.js"></script>
 </html>

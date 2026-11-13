@@ -23,7 +23,17 @@ Phone turns write their channel to RT/phone (bin/glitch, GLITCH_PORTAL=phone):
   pair           {hash: sha256 of the code, expires, tries}, made by `glitch pair`
 RT/turn.portal   "<desk|phone> <pid>" while a turn runs; its changes reach the page
                  as `turn` {turn: desk|phone|null}, which no file holds
-DATA/portal/devices holds one "<sha256 of device key>\t<epoch>\t<user agent>" line per phone.
+DATA/portal/devices  {"<sha256 of device key>": {paired: epoch, agent, push?: endpoint}}, one entry per phone
+DATA/portal/vapid.pem the P-256 key that signs Web Push (VAPID, RFC 8292), made on first start
+
+Push: the messages carry no payload (no encryption, nothing readable at the push
+service), so the service worker asks GET /api/notice what to show:
+  {approve: [{id, label, ask}], reply: {summary} | null}
+GET /api/push gives {key}, the applicationServerKey; POST /api/push {endpoint}
+stores this device's subscription (endpoint null forgets it). due() decides when
+to push: "needs you" once an approval waits NEED_AFTER s, "finished" once a
+reply's speech went unplayed (no page for UNHEARD_AFTER s, or a page that didn't
+play it within its length + 5 s). Phone turns only: desk turns never write here.
 
 Clips: kind is cue, say, ask or aside; ms its length; env the orb's "say" payload
 ("<hz> <v>...") or null. A cue plays on arrival, over anything, like the desk's
@@ -38,8 +48,10 @@ the page stops it on `approved`. Speech that never played is in hello.replay.
 """
 
 import argparse
+import base64
 import hashlib
 import hmac
+import http.client
 import json
 import os
 import queue
@@ -72,6 +84,11 @@ UNPAIRED_SECONDS = 10
 PING_SECONDS = 5
 DEAD_PEER_MS = 20000
 PAIR_TRIES = 5
+NEED_AFTER = 5
+UNHEARD_AFTER = 3
+PUSH_HOSTS = {"fcm.googleapis.com", "updates.push.services.mozilla.com"}
+PUSH_TTL = {"needs": 300, "finished": 3600}
+PUSH_URGENCY = {"needs": "high", "finished": "normal"}
 TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript", ".mjs": "text/javascript",
          ".css": "text/css", ".json": "application/json", ".svg": "image/svg+xml", ".png": "image/png",
          ".wav": "audio/wav", ".glsl": "text/plain; charset=utf-8", ".webmanifest": "application/manifest+json",
@@ -126,6 +143,37 @@ def frame(ev):
     return f"event: {ev['type']}\ndata: {json.dumps(ev, separators=(',', ':'))}\n\n".encode()
 
 
+def b64u(b):
+    return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+
+
+class Vapid:
+    def __init__(self, path):
+        self.path = path
+        if not os.path.exists(path):
+            os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+            pem = subprocess.run(["openssl", "ecparam", "-name", "prime256v1", "-genkey", "-noout"],
+                                 capture_output=True, check=True).stdout
+            write_atomic(path, pem.decode())
+        der = subprocess.run(["openssl", "ec", "-in", path, "-pubout", "-outform", "DER"],
+                             capture_output=True, check=True).stdout
+        # SubjectPublicKeyInfo for P-256 ends with the 65-byte uncompressed point.
+        self.key = b64u(der[-65:])
+
+    def header(self, aud):
+        head = b64u(json.dumps({"typ": "JWT", "alg": "ES256"}).encode())
+        claims = b64u(json.dumps({"aud": aud, "exp": int(time.time()) + 12 * 3600,
+                                  "sub": "mailto:glitch@localhost"}).encode())
+        signing = f"{head}.{claims}"
+        der = subprocess.run(["openssl", "dgst", "-sha256", "-sign", self.path], input=signing.encode(),
+                             capture_output=True, check=True, timeout=10).stdout
+        # openssl gives DER SEQUENCE {INTEGER r, INTEGER s}; JWS ES256 wants r || s, 32 bytes each.
+        n = der[3]
+        r, s = der[4:4 + n], der[6 + n:6 + n + der[5 + n]]
+        sig = int.from_bytes(r).to_bytes(32) + int.from_bytes(s).to_bytes(32)
+        return f"vapid t={signing}.{b64u(sig)}, k={self.key}"
+
+
 class Portal:
     def __init__(self, a):
         self.a = a
@@ -138,7 +186,14 @@ class Portal:
         self.state = self.heard = self.reply = self.turn = None
         self.unplayed = {}
         self.pending = {}
-        self.devices = (None, set())
+        self.asked = {}
+        self.waiting = None
+        self.devices = (None, {})
+        self.dev_lock = threading.Lock()
+        self.pushes = queue.Queue()
+        self.vapid = None
+        # Tests only, and only with --plain: one more push origin (a local stand-in).
+        self.push_test = os.environ.get("GLITCH_PORTAL_PUSH_TEST") if a.plain else None
         self.pos = 0
         self.live = False
 
@@ -161,21 +216,97 @@ class Portal:
         try:
             mt = os.stat(self.devices_path).st_mtime_ns
             if self.devices[0] != mt:
-                with open(self.devices_path) as f:
-                    self.devices = (mt, {ln.split("\t")[0] for ln in f if ln.strip()})
+                d = read_json(self.devices_path)
+                self.devices = (mt, d if isinstance(d, dict) else {})
         except OSError:
-            return set()
+            return {}
         return self.devices[1]
 
+    def edit_device(self, key_hash, fn):
+        with self.dev_lock:
+            os.makedirs(os.path.dirname(self.devices_path), mode=0o700, exist_ok=True)
+            d = dict(self.device_hashes())
+            if fn(d, key_hash) is not False:
+                write_atomic(self.devices_path, json.dumps(d, indent=1))
+
     def add_device(self, key_hash, agent):
-        os.makedirs(os.path.dirname(self.devices_path), mode=0o700, exist_ok=True)
+        entry = {"paired": int(time.time()), "agent": re.sub(r"[\x00-\x1f]", " ", agent)[:160]}
+        self.edit_device(key_hash, lambda d, h: d.__setitem__(h, entry))
+
+    def set_push(self, key_hash, endpoint, only_if=None):
+        def fn(d, h):
+            if h not in d or (only_if and d[h].get("push") != only_if):
+                return False
+            d[h] = {k: v for k, v in d[h].items() if k != "push"}
+            if endpoint:
+                d[h]["push"] = endpoint
+        self.edit_device(key_hash, fn)
+
+    def push_ok(self, endpoint):
+        if not isinstance(endpoint, str) or len(endpoint) > 1024 or re.search(r"[\s\x00-\x1f]", endpoint):
+            return False
+        u = urlsplit(endpoint)
+        if u.fragment or not u.path.startswith("/"):
+            return False
+        if self.push_test and f"{u.scheme}://{u.netloc}" == self.push_test:
+            return True
+        return u.scheme == "https" and u.netloc in PUSH_HOSTS
+
+    def due(self):
+        now = time.monotonic()
+        with self.lock:
+            for i, t in list(self.asked.items()):
+                if now - t >= NEED_AFTER:
+                    del self.asked[i]
+                    self.pushes.put("needs")
+            w = self.waiting
+            if not w or w["pushed"] or now - w["at"] < UNHEARD_AFTER:
+                return
+            if not self.clients:
+                w["pushed"] = True
+                self.pushes.put("finished")
+            elif not w["clip"]:
+                self.waiting = None
+            elif now - w["at"] >= w["ms"] / 1000 + 5:
+                w["pushed"] = True
+                self.pushes.put("finished")
+
+    def notice(self):
+        with self.lock:
+            return {"approve": [{k: a.get(k) for k in ("id", "label", "ask")} for a in self.pending.values()],
+                    "reply": {"summary": self.waiting["summary"]} if self.waiting else None}
+
+    def pusher(self):
+        while True:
+            kind = self.pushes.get()
+            for h, d in list(self.device_hashes().items()):
+                if isinstance(d, dict) and d.get("push") and self.vapid:
+                    try:
+                        self.push(h, d["push"], kind)
+                    except Exception as e:
+                        self.log(f"push {kind}: {type(e).__name__}: {e}"[:300])
+
+    def push(self, key_hash, endpoint, kind):
+        if not self.push_ok(endpoint):
+            return
+        u = urlsplit(endpoint)
+        conn = (http.client.HTTPSConnection if u.scheme == "https" else http.client.HTTPConnection)(u.netloc, timeout=10)
         try:
-            with open(self.devices_path) as f:
-                old = f.read()
-        except OSError:
-            old = ""
-        agent = re.sub(r"[\t\n\r]", " ", agent)[:160]
-        write_atomic(self.devices_path, old + f"{key_hash}\t{int(time.time())}\t{agent}\n")
+            # No body: Web Push without a payload needs no encryption (RFC 8030 5, RFC 8291).
+            conn.request("POST", u.path + (f"?{u.query}" if u.query else ""), body=b"", headers={
+                "Authorization": self.vapid.header(f"{u.scheme}://{u.netloc}"), "TTL": str(PUSH_TTL[kind]),
+                "Urgency": PUSH_URGENCY[kind], "Topic": "glitch", "Content-Length": "0"})
+            r = conn.getresponse()
+            r.read(4096)
+        finally:
+            conn.close()
+        if r.status in (404, 410):
+            self.set_push(key_hash, None, only_if=endpoint)
+            self.log(f"push subscription gone ({r.status}), forgot it")
+        elif r.status >= 300:
+            self.log(f"push {kind}: HTTP {r.status}")
+        else:
+            self.log(f"pushed {kind}")
 
     def pair(self, code, agent):
         path = self.path("pair")
@@ -202,6 +333,8 @@ class Portal:
     def finish(self, ids, how):
         for i in ids:
             self.unplayed.pop(i, None)
+            if self.waiting and self.waiting["clip"] == i:
+                self.waiting = None
             if self.live and os.path.exists(self.path("clips", i)):
                 write_atomic(self.path("clips", i + ".played"), how)
 
@@ -210,14 +343,19 @@ class Portal:
         with self.lock:
             if t == "signal" and ev.get("line") in ("turn", "rest"):
                 self.pending.clear()
+                self.asked.clear()
                 if ev["line"] == "turn":
                     self.unplayed.clear()
+                    self.waiting = None
             elif t == "clip":
                 if ev.get("approve") and ev["approve"] not in self.pending:
                     return
                 ev["url"] = "/clips/" + ev.get("id", "")
                 if ev.get("kind") in SPEECH:
                     self.unplayed[ev["id"]] = ev
+                w = self.waiting
+                if ev.get("kind") == "say" and w and not w["clip"] and not w["pushed"]:
+                    w.update(clip=ev["id"], ms=ev.get("ms") or 0, at=time.monotonic())
             elif t == "hush":
                 self.finish(list(self.unplayed), "hushed")
             elif t == "state":
@@ -226,10 +364,16 @@ class Portal:
                 self.heard, self.reply = ev.get("text"), None
             elif t == "reply":
                 self.reply = ev
+                if self.live:
+                    self.waiting = {"summary": ev.get("summary") or "", "at": time.monotonic(),
+                                    "clip": None, "ms": 0, "pushed": False}
             elif t == "approve":
                 self.pending[ev.get("id")] = ev
+                if self.live:
+                    self.asked[ev.get("id")] = time.monotonic()
             elif t == "approved":
                 self.pending.pop(ev.get("id"), None)
+                self.asked.pop(ev.get("id"), None)
                 self.finish([i for i, c in self.unplayed.items() if c.get("approve") == ev.get("id")], "hushed")
             msg = frame(ev)
             for q in list(self.clients):
@@ -289,6 +433,7 @@ class Portal:
             buf = self.read_events(buf)
             if n % 5 == 0:
                 self.watch_turn()
+                self.due()
 
     def watch_turn(self):
         turn = self.turn_portal()
@@ -386,12 +531,18 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(401, {"error": "unpaired"})
         if method == "POST":
             fn = {"/api/pair": self.post_pair, "/api/talk": self.post_talk, "/api/approve": self.post_approve,
-                  "/api/cancel": self.post_cancel, "/api/played": self.post_played}.get(path)
+                  "/api/cancel": self.post_cancel, "/api/played": self.post_played, "/api/push": self.post_push}.get(path)
             return fn(parse_qs(url.query)) if fn else self.send_json(404, {"error": "not found"})
         if path == "/api/events":
             return self.events()
         if path == "/api/reactions":
             return self.send_json(200, self.p.reactions())
+        if path == "/api/notice":
+            return self.send_json(200, self.p.notice(), headers={"Cache-Control": "no-store"})
+        if path == "/api/push":
+            if not self.p.vapid:
+                return self.send_json(404, {"error": "no push"})
+            return self.send_json(200, {"key": self.p.vapid.key})
         if path == "/pair":
             return self.send(200, PAIR_PAGE, TYPES[".html"])
         name = path.rsplit("/", 1)[-1]
@@ -488,6 +639,15 @@ class Handler(BaseHTTPRequestHandler):
                 self.p.finish(list(self.p.unplayed), "hushed")
             elif CLIP.fullmatch(ident):
                 self.p.finish([ident], "played")
+        self.send_json(200, {"ok": True})
+
+    def post_push(self, q):
+        endpoint = self.body_json().get("endpoint")
+        if endpoint is not None and not (self.p.vapid and self.p.push_ok(endpoint)):
+            host = urlsplit(endpoint).netloc if isinstance(endpoint, str) else type(endpoint).__name__
+            self.p.log(f"refused a push endpoint at {host[:80]!r}: not a known push service")
+            return self.send_json(422, {"error": "endpoint"})
+        self.p.set_push(sha(self.key), endpoint)
         self.send_json(200, {"ok": True})
 
     def events(self):
@@ -606,6 +766,10 @@ def main():
     buf = portal.read_events()
     portal.live = True
     try:
+        portal.vapid = Vapid(os.path.join(a.data, "portal", "vapid.pem"))
+    except (OSError, subprocess.CalledProcessError) as e:
+        portal.log(f"no push: {e}"[:300])
+    try:
         srv = Server((a.addr, a.port), Handler)
         if not a.plain:
             ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -616,6 +780,7 @@ def main():
         sys.exit(f"glitch portal: {a.addr}:{a.port}: {e}")
     srv.portal = portal
     threading.Thread(target=portal.tail, args=(buf,), daemon=True).start()
+    threading.Thread(target=portal.pusher, daemon=True).start()
     portal.log(f"portal on {portal.scheme}://{portal.host}")
     srv.serve_forever()
 
