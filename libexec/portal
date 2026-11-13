@@ -23,7 +23,8 @@ Phone turns write their channel to RT/phone (bin/glitch, GLITCH_PORTAL=phone):
   pair           {hash: sha256 of the code, expires, tries}, made by `glitch pair`
 RT/turn.portal   "<desk|phone> <pid>" while a turn runs; its changes reach the page
                  as `turn` {turn: desk|phone|null}, which no file holds
-DATA/portal/devices  {"<sha256 of device key>": {paired: epoch, agent, push?: endpoint}}, one entry per phone
+DATA/portal/devices  {"<sha256 of device key>": {paired: epoch, agent, push?: endpoint}}, one entry per phone;
+                     edited only under flock on DATA/portal/devices.lock (glitch unpair takes it too)
 DATA/portal/vapid.pem the P-256 key that signs Web Push (VAPID, RFC 8292), made on first start
 
 Push: the messages carry no payload (no encryption, nothing readable at the push
@@ -31,7 +32,8 @@ service), so the service worker asks GET /api/notice what to show:
   {approve: [{id, label, ask}], reply: {summary} | null}
 GET /api/push gives {key}, the applicationServerKey; POST /api/push {endpoint}
 stores this device's subscription (endpoint null forgets it). due() decides when
-to push: "needs you" once an approval waits NEED_AFTER s, "finished" once a
+to push: "needs you" once an approval waits NEED_AFTER s, "settled" when one it
+pushed for ends unanswered (timed out, or its turn ended), "finished" once a
 reply's speech went unplayed (no page for UNHEARD_AFTER s, or a page that didn't
 play it within its length + 5 s). Phone turns only: desk turns never write here.
 
@@ -49,6 +51,7 @@ the page stops it on `approved`. Speech that never played is in hello.replay.
 
 import argparse
 import base64
+import fcntl
 import hashlib
 import hmac
 import http.client
@@ -70,7 +73,8 @@ from urllib.parse import parse_qs, urlsplit
 COOKIE = "glitch_device"
 COOKIE_AGE = 34560000  # Chrome caps a cookie's lifetime at 400 days
 PUBLIC = {("GET", "/pair"), ("POST", "/api/pair"),
-          ("GET", "/manifest.webmanifest"), ("GET", "/icon-192.png"), ("GET", "/icon-512.png")}
+          ("GET", "/manifest.webmanifest"), ("GET", "/icon-192.png"), ("GET", "/icon-512.png"),
+          ("GET", "/icon-mono-192.png"), ("GET", "/icon-mono-512.png")}
 AUDIO = {"audio/webm": "matroska", "video/webm": "matroska", "audio/ogg": "ogg", "audio/mp4": "mov",
          "audio/wav": "wav", "audio/x-wav": "wav", "audio/wave": "wav"}
 CLIP = re.compile(r"[0-9]+-(cue|say|ask|aside)\.wav")
@@ -87,8 +91,8 @@ PAIR_TRIES = 5
 NEED_AFTER = 5
 UNHEARD_AFTER = 3
 PUSH_HOSTS = {"fcm.googleapis.com", "updates.push.services.mozilla.com"}
-PUSH_TTL = {"needs": 300, "finished": 3600}
-PUSH_URGENCY = {"needs": "high", "finished": "normal"}
+PUSH_TTL = {"needs": 300, "settled": 300, "finished": 3600}
+PUSH_URGENCY = {"needs": "high", "settled": "normal", "finished": "normal"}
 TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript", ".mjs": "text/javascript",
          ".css": "text/css", ".json": "application/json", ".svg": "image/svg+xml", ".png": "image/png",
          ".wav": "audio/wav", ".glsl": "text/plain; charset=utf-8", ".webmanifest": "application/manifest+json",
@@ -188,6 +192,7 @@ class Portal:
         self.unplayed = {}
         self.pending = {}
         self.asked = {}
+        self.pushed = set()
         self.waiting = None
         self.devices = (None, {})
         self.dev_lock = threading.Lock()
@@ -226,13 +231,27 @@ class Portal:
     def edit_device(self, key_hash, fn):
         with self.dev_lock:
             os.makedirs(os.path.dirname(self.devices_path), mode=0o700, exist_ok=True)
-            d = dict(self.device_hashes())
-            if fn(d, key_hash) is not False:
+            fd = os.open(self.devices_path + ".lock", os.O_WRONLY | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                d = dict(self.device_hashes())
+                if fn(d, key_hash) is False:
+                    return False
                 write_atomic(self.devices_path, json.dumps(d, indent=1))
+                return True
+            finally:
+                os.close(fd)
 
-    def add_device(self, key_hash, agent):
+    def add_device(self, key_hash, agent, pair):
         entry = {"paired": int(time.time()), "agent": re.sub(r"[\x00-\x1f]", " ", agent)[:160]}
-        self.edit_device(key_hash, lambda d, h: d.__setitem__(h, entry))
+
+        def fn(d, h):
+            try:
+                os.remove(pair)
+            except FileNotFoundError:
+                return False
+            d[h] = entry
+        return self.edit_device(key_hash, fn)
 
     def set_push(self, key_hash, endpoint, only_if=None):
         def fn(d, h):
@@ -259,6 +278,7 @@ class Portal:
             for i, t in list(self.asked.items()):
                 if now - t >= NEED_AFTER:
                     del self.asked[i]
+                    self.pushed.add(i)
                     self.pushes.put("needs")
             w = self.waiting
             if not w or w["pushed"] or now - w["at"] < UNHEARD_AFTER:
@@ -284,7 +304,7 @@ class Portal:
                 if isinstance(d, dict) and d.get("push") and self.vapid:
                     try:
                         self.push(h, d["push"], kind)
-                    except Exception as e:
+                    except (OSError, http.client.HTTPException, subprocess.SubprocessError, ValueError, IndexError) as e:
                         self.log(f"push {kind}: {type(e).__name__}: {e}"[:300])
 
     def push(self, key_hash, endpoint, kind):
@@ -325,9 +345,9 @@ class Portal:
                 else:
                     write_atomic(path, json.dumps(p))
                 return None
-            os.remove(path)
             key = secrets.token_urlsafe(32)
-            self.add_device(sha(key), agent)
+            if not self.add_device(sha(key), agent, path):
+                return None
             self.log("paired a phone")
             return key
 
@@ -343,8 +363,11 @@ class Portal:
         t = ev["type"]
         with self.lock:
             if t == "signal" and ev.get("line") in ("turn", "rest"):
+                if self.pushed & self.pending.keys():
+                    self.pushes.put("settled")
                 self.pending.clear()
                 self.asked.clear()
+                self.pushed.clear()
                 if ev["line"] == "turn":
                     self.unplayed.clear()
                     self.waiting = None
@@ -375,6 +398,9 @@ class Portal:
             elif t == "approved":
                 self.pending.pop(ev.get("id"), None)
                 self.asked.pop(ev.get("id"), None)
+                if ev.get("id") in self.pushed and ev.get("answer") not in ("allow", "deny"):
+                    self.pushes.put("settled")
+                self.pushed.discard(ev.get("id"))
                 self.finish([i for i, c in self.unplayed.items() if c.get("approve") == ev.get("id")], "hushed")
             msg = frame(ev)
             for q in list(self.clients):
@@ -422,7 +448,7 @@ class Portal:
                 ev = json.loads(ln)
                 if isinstance(ev, dict) and isinstance(ev.get("type"), str):
                     self.publish(ev)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - replay must get past any bad line
                 self.log(f"skipped event line: {type(e).__name__}: {e}: {ln[:120]!r}"[:300])
         return buf
 
@@ -455,7 +481,7 @@ class Portal:
     def glitch(self, *args, timeout=30):
         env = dict(os.environ, GLITCH_PORTAL="phone")
         return subprocess.run([self.a.glitch, *args], env=env, capture_output=True, text=True,
-                              timeout=timeout, stdin=subprocess.DEVNULL)
+                              timeout=timeout, stdin=subprocess.DEVNULL, check=False)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -511,7 +537,7 @@ class Handler(BaseHTTPRequestHandler):
             self.dispatch(method)
         except (BrokenPipeError, ConnectionResetError, TimeoutError, ssl.SSLError):
             pass
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - any failure becomes a JSON error
             self.p.log(f"{method} {urlsplit(self.path).path}: {type(e).__name__}: {e}"[:300])
             if not self.responded:
                 self.send_json(400 if isinstance(e, ValueError) else 500, {"error": "request"})
@@ -601,14 +627,14 @@ class Handler(BaseHTTPRequestHandler):
                 f.write(data)
             r = subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", "-f", fmt, "-i", src,
                                 "-t", str(self.p.a.max_seconds), "-vn", "-ar", "16000", "-ac", "1",
-                                "-c:a", "pcm_s16le", "-y", wav], capture_output=True, timeout=60)
+                                "-c:a", "pcm_s16le", "-y", wav], capture_output=True, timeout=60, check=False)
             if r.returncode or not os.path.isfile(wav):
                 self.p.log(f"ffmpeg: {r.stderr.decode(errors='replace').strip()[:300]}")
                 return self.send_json(422, {"error": "audio"})
             ms = max(0, os.path.getsize(wav) - 44) * 1000 // 32000
             t1 = time.monotonic()
             r = subprocess.run(["voxtype", "-q", "transcribe", wav], capture_output=True, text=True,
-                               timeout=30 + 2 * ms / 1000)
+                               timeout=30 + 2 * ms / 1000, check=False)
             if r.returncode:
                 self.p.log(f"voxtype: {r.stderr.strip()[-300:]}")
                 return self.send_json(500, {"error": "transcribe"})
@@ -627,6 +653,9 @@ class Handler(BaseHTTPRequestHandler):
             if ident not in self.p.pending or not isinstance(b.get("allow"), bool):
                 return self.send_json(409, {"error": "stale"})
             write_atomic(self.p.path(f"approve.{ident}"), "allow" if b["allow"] else "deny")
+            self.p.pending.pop(ident)
+            self.p.asked.pop(ident, None)
+            self.p.pushed.discard(ident)
         self.send_json(200, {"ok": True})
 
     def post_cancel(self, q):
