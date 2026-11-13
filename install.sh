@@ -202,9 +202,10 @@ link "$REPO/systemd/glitch-portal.service" "$CONFIG/systemd/user/glitch-portal.s
 systemctl --user daemon-reload
 { read -r p_addr; read -r p_port; read -r p_cert; read -r p_key; } < <(
   set +u
-  DATA=$DATA
-  . "$REPO/config/glitch.conf"
-  [[ -f $CONFIG/glitch/glitch.conf ]] && . "$CONFIG/glitch/glitch.conf"
+  {
+    . "$REPO/config/glitch.conf"
+    [[ -f $CONFIG/glitch/glitch.conf ]] && . "$CONFIG/glitch/glitch.conf"
+  } >/dev/null
   printf '%s\n' "$PORTAL_ADDR" "$PORTAL_PORT" "$PORTAL_CERT" "$PORTAL_KEY"
 )
 if [[ -z $p_addr ]]; then

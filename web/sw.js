@@ -2,31 +2,55 @@
 // of reach, and turns payload-less pushes into notifications (libexec/portal's
 // docstring has the push side).
 //
-// Responses served from the saved copy carry X-Glitch-Saved: 1 (app.js reads it).
-const SHELL = "glitch-shell", TAG = "glitch"
+// The shell is saved as whole sets, one cache each ("shell-<ms>"), and a page loads
+// every file from the set its navigation got; saved files carry X-Glitch-Set: <name>.
+// A page's message "refresh" refreshes the saved set and is answered {set: <newest>}.
+// Cache "handoff" holds /allow {id, at}: Allow once pressed on a notification, for the
+// page to send once it's open (a notification action works on a locked phone; opening the app doesn't).
 const FILES = ["/", "/app.js", "/orb.js", "/plugin/orb.mjs", "/plugin/orb.glsl", "/sounds/start.wav", "/sounds/stop.wav",
-  "/sounds/unsure.wav", "/icon-192.png", "/icon-512.png", "/manifest.webmanifest", "/api/reactions"]
-const WAIT_MS = 1800, DOWN_MS = 10000
-let downAt = 0
+  "/sounds/unsure.wav", "/icon-192.png", "/icon-512.png", "/icon-mono-192.png", "/manifest.webmanifest", "/api/reactions"]
+const SET = "shell-", HANDOFF = "handoff", TAG = "glitch"
+// Away without Tailscale, the home address mostly hangs rather than failing, so a slow
+// answer counts as none and the saved set opens.
+const WAIT_MS = 1800, GIVE_UP_MS = 20000, FRESH_MS = 5000
+const pins = new Map()
+let running = null, refreshed = 0
 
 // The server redirects unpaired requests to /pair or answers 401: only a plain 200 is a shell.
 const good = r => r.ok && r.type === "basic" && !r.redirected
-
-function keep(path, r) {
-  if (!good(r)) return null
-  const copy = r.clone()
-  return caches.open(SHELL).then(c => c.put(path, copy))
+function same(a, b) {
+  const x = new Uint8Array(a), y = new Uint8Array(b)
+  return x.length === y.length && x.every((v, i) => v === y[i])
 }
+const newest = async () => (await caches.keys()).filter(n => n.startsWith(SET)).sort().at(-1) || null
+const saved = (name, path) => name ? caches.match(path, { cacheName: name }) : Promise.resolve(undefined)
 
-function marked(r) {
-  const headers = new Headers(r.headers)
-  headers.set("X-Glitch-Saved", "1")
-  return new Response(r.body, { status: r.status, statusText: r.statusText, headers })
+// Resolves to the network's "/" when the set couldn't be fetched whole, else null.
+function refresh() {
+  if (Date.now() - refreshed < FRESH_MS) return Promise.resolve(null)
+  return running ||= (async () => {
+    const got = await Promise.all(FILES.map(f => fetch(f, { cache: "no-cache", redirect: "manual", signal: AbortSignal.timeout(GIVE_UP_MS) })))
+    if (!got.every(good)) return got[0]
+    const bufs = await Promise.all(got.map(r => r.arrayBuffer()))
+    const old = await newest()
+    const was = await Promise.all(FILES.map(f => saved(old, f).then(r => r?.arrayBuffer())))
+    if (!was.every((b, i) => b && same(b, bufs[i]))) {
+      const name = SET + Date.now(), c = await caches.open(name)
+      await Promise.all(FILES.map((f, i) => {
+        const headers = new Headers(got[i].headers)
+        headers.set("X-Glitch-Set", name)
+        return c.put(f, new Response(bufs[i], { status: 200, headers }))
+      }))
+      for (const n of await caches.keys()) if (n !== name && n !== old && n !== HANDOFF) await caches.delete(n)
+    }
+    refreshed = Date.now()
+    return null
+  })().finally(() => { running = null })
 }
 
 self.addEventListener("install", e => {
   self.skipWaiting()
-  e.waitUntil(Promise.all(FILES.map(f => fetch(f, { redirect: "manual", cache: "no-cache" }).then(r => keep(f, r), () => {}))))
+  e.waitUntil(refresh().catch(() => {}))
 })
 
 self.addEventListener("activate", e => e.waitUntil(clients.claim()))
@@ -34,23 +58,31 @@ self.addEventListener("activate", e => e.waitUntil(clients.claim()))
 self.addEventListener("fetch", e => {
   const req = e.request, url = new URL(req.url)
   if (req.method !== "GET" || url.origin !== location.origin || !FILES.includes(url.pathname)) return
-  let stored = null
-  const net = Date.now() - downAt < DOWN_MS && req.mode !== "navigate" ? null
-    : fetch(req).then(r => { downAt = 0; stored = keep(url.pathname, r); return r },
-      err => { downAt = Date.now(); throw err })
-  if (net) e.waitUntil(net.then(() => stored, () => {}))
-  e.respondWith(answer(req, url.pathname, net))
+  if (req.mode === "navigate") {
+    const job = refresh()
+    e.waitUntil(job.catch(() => {}))
+    return e.respondWith(open(req, job, e.resultingClientId))
+  }
+  e.respondWith((async () => {
+    const name = pins.has(e.clientId) ? pins.get(e.clientId) : await newest()
+    return await saved(name, url.pathname) || fetch(req)
+  })())
 })
 
-async function answer(req, path, net) {
-  if (net) {
-    const r = await Promise.race([net.catch(() => null), new Promise(ok => setTimeout(ok, WAIT_MS))])
-    if (r) return r
-    downAt = Date.now()
+async function open(req, job, client) {
+  const net = await Promise.race([job, new Promise(ok => setTimeout(ok, WAIT_MS, null))]).catch(() => null)
+  const name = await newest(), home = await saved(name, "/")
+  if (home && !(net && (net.type === "opaqueredirect" || net.status === 401))) {
+    pins.set(client, name)
+    return home
   }
-  const saved = await caches.match(path, { cacheName: SHELL })
-  return saved ? marked(saved) : net || fetch(req)
+  pins.set(client, null)
+  return net?.clone() || fetch(req)
 }
+
+self.addEventListener("message", e => {
+  if (e.data === "refresh") e.waitUntil(refresh().catch(() => {}).then(newest).then(set => e.source.postMessage({ set })))
+})
 
 // --- notifications ---
 
@@ -60,7 +92,7 @@ async function answer(req, path, net) {
 // push_messaging_notification_manager.cc), and it forgives an occasional miss.
 self.addEventListener("push", e => e.waitUntil(woke()))
 
-async function woke() {
+async function woke(answered) {
   const wins = await clients.matchAll({ type: "window", includeUncontrolled: true })
   if (wins.some(w => w.visibilityState === "visible" && w.focused)) return
   let n = null
@@ -76,23 +108,27 @@ async function woke() {
     actions: [{ action: "allow", title: "Allow once" }, { action: "deny", title: "Deny" }]
   })
   if (n.reply) return show("glitch finished", n.reply.summary)
-  for (const x of await self.registration.getNotifications({ tag: TAG })) x.close()
+  const left = await self.registration.getNotifications({ tag: TAG })
+  if (!answered && left.some(x => x.data?.id)) return show("glitch", "No longer waiting for you.", { silent: true, renotify: false })
+  for (const x of left) x.close()
 }
 
 function show(title, body, opts = {}) {
-  return self.registration.showNotification(title, { body, tag: TAG, renotify: true, icon: "/icon-192.png", ...opts })
+  return self.registration.showNotification(title, { body, tag: TAG, renotify: true, icon: "/icon-192.png", badge: "/icon-mono-192.png", ...opts })
 }
 
 self.addEventListener("notificationclick", e => {
   e.notification.close()
-  e.waitUntil(clicked(e.action, e.notification.data))
+  e.waitUntil(clicked(e.action, e.notification.data?.id))
 })
 
-async function clicked(action, data) {
-  if (action && data?.id) {
+async function clicked(action, id) {
+  if (id && action === "deny") {
     const r = await fetch("/api/approve", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id: data.id, allow: action === "allow" }) }).catch(() => null)
-    if (r?.ok || r?.status === 409) return
+      body: JSON.stringify({ id, allow: false }) }).catch(() => null)
+    if (r?.ok) return woke(true)
+  } else if (id && action === "allow") {
+    await (await caches.open(HANDOFF)).put("/allow", new Response(JSON.stringify({ id, at: Date.now() })))
   }
   const [w] = await clients.matchAll({ type: "window", includeUncontrolled: true })
   return w ? w.focus() : clients.openWindow("/")

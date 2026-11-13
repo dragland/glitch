@@ -5,7 +5,7 @@ PartOf=graphical-session.target
 After=graphical-session.target
 ConditionEnvironment=WAYLAND_DISPLAY
 # Off until the owner opts in: glitch cert writes this (and needs PORTAL_ADDR).
-ConditionPathExists=%h/.local/share/glitch/portal/glitch-ca.crt
+ConditionPathExists=%D/glitch/portal/glitch-ca.crt
 
 [Service]
 ExecStart=%h/.local/bin/glitch portal

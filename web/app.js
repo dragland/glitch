@@ -5,7 +5,7 @@ const $ = id => document.getElementById(id)
 const canvas = $("orb"), textEl = $("text"), heardEl = $("heard"), lineEl = $("line"), bodyEl = $("body")
 const askEl = $("ask"), labelEl = $("label"), allowEl = $("allow"), denyEl = $("deny"), cancelEl = $("cancel")
 const awayEl = $("away"), offerEl = $("offer"), yesEl = $("yes"), noEl = $("no")
-const TAP_MS = 250
+const TAP_MS = 250, HANDOFF_MS = 30000, RELOAD_MS = 30000
 const WORK = new Set(["thinking", "tool"])
 
 const pair = () => { location.href = "/pair" }
@@ -19,12 +19,14 @@ async function api(path, body) {
 
 navigator.serviceWorker?.register("/sw.js").catch(() => {})
 
-let reactions = {}, offline = false
+const notice = () => fetch("/api/notice", { cache: "no-store", signal: AbortSignal.timeout(3000) }).catch(() => null)
+const reached = notice()
+let reactions = {}, offline = false, shell = null, stale = false
 {
   const r = await fetch("/api/reactions").catch(() => null)
   if (r?.status === 401) pair()
   else if (r?.ok) reactions = await r.json()
-  offline = !r || r.headers.get("X-Glitch-Saved") === "1"
+  shell = r?.headers.get("X-Glitch-Set")
 }
 const listenLook = () => reactions.listening || null
 const restLook = () => reactions.mood?.calm || null
@@ -98,6 +100,7 @@ function show() {
 }
 
 function render() {
+  if (update()) return
   awayEl.hidden = !offline
   offerEl.hidden = !offering || offline || approvals.length > 0
   if (offline) {
@@ -210,8 +213,8 @@ function answered(id) {
   }
 }
 
-async function answer(allow) {
-  const a = approvals[0]
+async function answer(allow, id) {
+  const a = id ? approvals.find(a => a.id === id) : approvals[0]
   if (!a) return
   unlock()
   allowEl.disabled = denyEl.disabled = true
@@ -227,7 +230,7 @@ cancelEl.addEventListener("click", () => { unlock(); api("/api/cancel").catch(()
 // --- events ---
 
 const LOST_MS = 3000, PROBE_MS = 3000
-let es = null, lost = 0, probing = 0, synced = false
+let es = null, lost = 0, probing = 0, synced = false, met = false
 
 function goOffline() {
   clearTimeout(lost)
@@ -248,11 +251,12 @@ function probeSoon(ms) {
   probing = setTimeout(probe, ms)
 }
 
-async function probe() {
+async function probe(asked = notice()) {
   clearTimeout(probing)
-  const r = await fetch("/api/notice", { cache: "no-store", signal: AbortSignal.timeout(4000) }).catch(() => null)
+  const r = await asked
   if (r?.status === 401) return pair()
   if (r?.ok) { if (!es) connect() }
+  else if (!met) goOffline()
   else if (offline || !es) probeSoon(PROBE_MS)
 }
 
@@ -263,7 +267,7 @@ function connect() {
     clearTimeout(lost)
     lost = 0
     offline = false
-    if (!document.hidden) clearNotices()
+    met = true
     if (!synced && globalThis.Notification?.permission === "granted") { synced = true; subscribe().catch(() => {}) }
     turn = h.turn
     server = h.turn === "phone" ? h.state : null
@@ -272,6 +276,7 @@ function connect() {
     reply = h.reply
     for (const c of h.replay || []) clip(c)
     if (!local) show()
+    opened()
   })
   on("turn", m => {
     if (turn === "phone" && !m.turn && canOffer()) offering = true
@@ -298,8 +303,8 @@ function connect() {
     if (me.readyState === EventSource.CLOSED) { es = null; probeSoon(500) }
   }
 }
-if (offline) goOffline()
-else connect()
+connect()
+probe(reached)
 
 addEventListener("online", () => { if (offline || !es) probe() })
 
@@ -315,9 +320,29 @@ $("install").addEventListener("click", () => { $("install").hidden = true; insta
 const canOffer = () => "PushManager" in window && !!navigator.serviceWorker?.controller &&
   Notification.permission === "default" && !localStorage.getItem("glitch.push")
 
-function clearNotices() {
+// --- open with home answering: notices cleared, an Allow from a notification sent, a newer shell loaded when idle ---
+
+if (navigator.serviceWorker) navigator.serviceWorker.onmessage = e => {
+  if (shell && e.data?.set && e.data.set !== shell) { stale = true; render() }
+}
+
+async function opened() {
+  if (document.hidden) return
+  navigator.serviceWorker?.controller?.postMessage("refresh")
   navigator.serviceWorker?.getRegistration().then(r => r?.getNotifications({ tag: "glitch" }))
     .then(ns => ns?.forEach(n => n.close()), () => {})
+  const c = await globalThis.caches?.open("handoff"), r = await c?.match("/allow")
+  if (!r || !await c.delete("/allow")) return
+  const { id, at } = await r.json().catch(() => ({}))
+  if (Date.now() - at < HANDOFF_MS && !document.hidden && approvals.some(a => a.id === id)) answer(true, id)
+}
+
+function update() {
+  if (!stale || turn || local || press || playing || queue.length || approvals.length || WORK.has(server?.state)) return false
+  if (Date.now() - (+sessionStorage.getItem("glitch.reload") || 0) < RELOAD_MS) return false
+  sessionStorage.setItem("glitch.reload", Date.now())
+  location.reload()
+  return true
 }
 
 const bytes = b64 => Uint8Array.from(atob(b64.replace(/-/g, "+").replace(/_/g, "/")), c => c.charCodeAt(0))
@@ -489,7 +514,7 @@ document.addEventListener("visibilitychange", () => {
   } else {
     orb.start()
     if (offline || !es) probe()
-    else clearNotices()
+    else opened()
   }
   wake()
 })
