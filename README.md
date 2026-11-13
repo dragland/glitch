@@ -84,21 +84,23 @@ Glitch's own voice turns (`claude -p`) don't appear there.
 
 ### Phone portal
 
-The phone portal is a page with its own orb that the phone opens over HTTPS,
-on your home network or through Tailscale. It talks to the same conversation
-as Super+D, and a turn asked from the phone answers only on the phone. It runs
-while you're logged in at the desk.
+A page with its own orb that the phone opens over HTTPS, at home or through
+Tailscale. It talks to the same conversation as Super+D, and a turn asked from
+the phone answers only on the phone. It runs while you're logged in at the desk.
 
 1. Reserve this machine's address in your router (a DHCP reservation), since the certificate and the paired app are tied to it, and set `PORTAL_ADDR=<that address>` in `~/.config/glitch/glitch.conf`.
 2. Run `glitch cert`.
-3. Copy `~/.local/share/glitch/portal/glitch-ca.crt` to the phone and install it in Settings > Security > Encryption & credentials > Install a certificate > CA certificate. Check that its fingerprint matches the one `glitch cert` printed. The CA's key is destroyed when it is made, so it can never vouch for anything else.
-4. Re-run `./install.sh`. It starts the portal, prints its address, and prints the firewall and Tailscale commands you still need to run.
+3. Copy `~/.local/share/glitch/portal/glitch-ca.crt` to the phone and install it in Settings > Security > Encryption & credentials > Install a certificate > CA certificate. Check that its fingerprint matches the one `glitch cert` printed. `glitch cert` destroys the CA's key, so it can't vouch for anything else.
+4. Re-run `./install.sh`. It starts the portal and prints its address and the firewall and Tailscale commands left for you to run.
 5. Open that address on the phone, say "pair my phone" at the desk (or run `glitch pair`), and type the code it speaks.
 6. Install it to the home screen.
 
-If the address or `PORTAL_PORT` changes: run `glitch cert --renew` if the address changed and install the new CA file on the phone, re-run `./install.sh`, then add the app to the home screen again and pair it again. `glitch unpair` forgets every phone.
+If the address changes, run `glitch cert --renew` and install the new CA file on the phone. After a new address or `PORTAL_PORT`, re-run `./install.sh`, add the app to the home screen again and pair it again. `glitch unpair` forgets every phone.
 
-Hold the orb to talk and let go to send; slide off it to throw the recording away, and tap it while glitch speaks to quiet it. The reply is typed out as it is spoken, with the full text to scroll below. When a phone turn needs your permission, the page shows everything the tool would get (the whole command, a file's full new content, every field of any other tool) with Allow once and Deny. A phone approval waits up to 5 minutes, and requests from the desk queue behind it. If the page isn't open, a notification asks instead: Deny answers at once; a short one-line shell command can be allowed from the notification after unlock; anything else opens the full card. Stop ends the running turn, whichever side started it, and "new chat, …" starts fresh as at the desk. Away from home the page shows "Can't reach home" with an Open Tailscale button. If you allow notifications, the phone tells you when glitch needs you or finished a reply you didn't hear. Root prompts (pkexec) appear only at the desk.
+- Hold the orb to talk and let go to send. Slide off it to throw the recording away, and tap while glitch speaks to quiet it. The reply is typed out as it is spoken, with the full text below.
+- When a phone turn needs your permission, the page shows everything the tool would get (the whole command, a file's full new content, every field of any other tool) with Allow once and Deny. It waits up to 5 minutes, and desk requests queue behind it. If the page isn't open, a notification asks instead: Deny answers at once, a short one-line shell command can be allowed from it after unlock, and anything else opens the full card. Root prompts (pkexec) appear only at the desk.
+- Stop ends the running turn, whichever side started it, and "new chat, …" starts fresh as at the desk.
+- Away from home the page offers an Open Tailscale button. If you allow notifications, the phone tells you when glitch needs you or finished a reply you didn't hear.
 
 Settings and their defaults are in [config/glitch.conf](config/glitch.conf);
 override them in `~/.config/glitch/glitch.conf`. Your own `reactions.json` there

@@ -35,8 +35,6 @@ mkdir -p "$RT"
 export GLITCH_BEEP_VOLUME="${BEEP_VOLUME:-2.0}" MIND JEV_MODEL OPENAI_DECIDE_MODEL
 
 PY="$DATA/venv/bin/python"
-# A turn's portal (desk or phone) is where its orb state, signals, cues and
-# speech go.
 PORTAL=desk
 [[ ${GLITCH_PORTAL:-} == phone ]] && PORTAL=phone
 export GLITCH_PORTAL=$PORTAL
@@ -57,9 +55,9 @@ log() { printf '%(%T)T.%s %s\n' -1 "${EPOCHREALTIME:11:3}" "$*" >>"$RT/glitch.lo
 
 write_atomic() { printf '%s\n' "$2" >"$1.$$" && mv "$1.$$" "$1"; }
 
-# jqs FILTER [OPTION...] -- STRING...: jq -c with $s the array of STRINGs, which go in
-# on stdin: an agent's text can pass the 128 KiB limit on one argument. Bash strings
-# hold no NUL, so NUL separates them.
+# jqs FILTER [OPTION...] -- STRING...: jq -c with $s the array of STRINGs. They go in on
+# stdin because an agent's text can pass Linux's 128 KiB limit on one argument. No bash
+# string holds a NUL, so NUL separates them.
 jqs() {
   local f=$1 o=()
   shift
@@ -68,16 +66,12 @@ jqs() {
   printf '%s\0' "$@" | jq -cRs "${o[@]}" "(split(\"\\u0000\") | .[:-1]) as \$s | $f"
 }
 
-# CLOCK: centiseconds since boot, which an NTP step doesn't move (libexec/portal
-# reads the same clock as CLOCK_BOOTTIME).
+# CLOCK: centiseconds since boot, which an NTP step doesn't move. libexec/portal reads
+# the same clock as CLOCK_BOOTTIME.
 clock() { local s; read -r s _ </proc/uptime; CLOCK=$((10#${s/./})); }
 
-# jq shared by every label that reaches a screen. vis makes characters that show
-# as nothing or as a plain space visible as \u{…} (controls, format and bidi,
-# default-ignorables such as variation selectors and Hangul fillers, the blank
-# braille cell, non-ASCII spaces, private-use and unassigned code points), so what
-# is shown is what runs. Combining marks and other scripts stay as they are.
-# status(name; input) is the phone's status phrase for a tool call.
+# In vis, \p{DI} is Oniguruma's Default_Ignorable_Code_Point (variation selectors,
+# Hangul fillers) and U+2800 is the blank braille cell.
 # shellcheck disable=SC2016 # jq, not bash
 JQ_DEFS='
 def hex: if . < 16 then "0123456789ABCDEF"[.:.+1] else (. / 16 | floor | hex) + (. % 16 | hex) end;
@@ -140,7 +134,6 @@ def status(n; i): (i // {}) as $i |
 
 state_file() { if [[ $PORTAL == phone ]]; then echo "$PH/state.json"; else echo "$RT/state.json"; fi; }
 
-# state [detail [status]]: detail is for the log, status the phone's status line.
 set_state() {
   local json
   json=$(jq -cn --arg s "$1" --argjson reaction "${REACTION:-null}" --arg status "${3:-}" --arg portal "$PORTAL" \
@@ -159,10 +152,8 @@ orb_set() {
   fi
 }
 
-# The phone's channel: one JSON object per line, read by libexec/portal (its
-# docstring lists the types). printf writes a long line in several writes, so
-# writers take the lock to keep lines whole. An event that couldn't be made is
-# logged, never sent as an empty line.
+# printf writes a long line in several write() calls, so writers take the lock to
+# keep lines whole.
 phone_send() {
   [[ -n $1 ]] || { log "phone: ${FUNCNAME[1]} made no event"; return 1; }
   { flock 3 && printf '%s\n' "$1" >&3; } 3>>"$PH/events.jsonl"
@@ -173,7 +164,6 @@ page_online() {
   { read -r pid <"$PH/online"; } 2>/dev/null && kill -0 "$pid" 2>/dev/null
 }
 
-# kind id [env [with-id lead-seconds]]; CLIP and CLIP_MS name the clip sent.
 clip_sent() {
   CLIP=$2
   # The sample rate is at byte 24 of the 44-byte WAV header; cue and Piper write 16-bit mono.
@@ -195,8 +185,6 @@ ev() {
   fi
 }
 
-# The portal of the running turn: turn.portal ("<portal> <pid>") lives while
-# the turn holds turn.lock. libexec/portal reads it the same way.
 turn_portal() {
   local portal pid
   { read -r portal pid <"$RT/turn.portal"; } 2>/dev/null && kill -0 "$pid" 2>/dev/null && echo "$portal"
@@ -216,7 +204,6 @@ forget_session() {
   close_card
 }
 
-# filter [jq args]: the repo's reactions.json with the user's merged over it.
 reactions() {
   local files=("$GLITCH_HOME/config/reactions.json")
   [[ -f $USER_CONF/reactions.json ]] && files+=("$USER_CONF/reactions.json")
@@ -272,10 +259,6 @@ speech_render() {
   SPEAK_PID=""
 }
 
-# file [with-id lead-seconds]: the phone's clip may start lead seconds after
-# clip with-id starts. Returns once the speech has played, as pw-play does: on
-# the phone, when the page says it ended or was hushed, after its length and
-# 2 s, or at once with no page connected.
 play() {
   local rc
   [[ -s $1 ]] || return 0
@@ -391,14 +374,14 @@ stop_live() {
 
 # --- agent adapters ---------------------------------------------------------------
 # An adapter reads the prompt on stdin, takes an optional session id, and emits
-# lines: "sid <id>", "mode <permission mode>", "tool <category>\t<id>\t<label>",
+# lines: "sid <id>", "mode <permission mode>", "tool <category>\t<id>\t<label>\t<phrase>",
 # "toolend <id>", "words <text>", "ctx <tokens in context>", "window <context
 # window>", "say <text>", "mood <word>", "result <json string>", "error <text>",
 # "denied <n>", then "exit <status>" last. Tool categories: look, make, run,
-# delegate. A subagent's own tool calls are dropped. `toolend` comes when the
-# call's work is done, which for a background subagent is later than its tool
-# result. `ctx` and `window` are Claude's only: Codex reports neither, so it
-# shows no tide.
+# delegate. The phrase is the phone's status line (jq `status`). A subagent's own
+# tool calls are dropped. `toolend` comes when the call's work is done, which for a
+# background subagent is later than its tool result. `ctx` and `window` are Claude's
+# only: Codex reports neither, so it shows no tide.
 
 adapter_claude() {
   local sid=${1:-} args
@@ -618,8 +601,7 @@ speech_stats() {
     '($ms / 1000) as $s | {seconds: ($s * 10 | round / 10), wps: (if $s > 0 then $words / $s * 10 | round / 10 else 0 end)}' 2>/dev/null
 }
 
-# What was said, from either portal: text fresh speech-stats. Prints empty,
-# pair, unpair, fresh or turn.
+# Prints empty, pair, unpair, fresh or turn: libexec/portal's /api/talk outcome.
 heard() {
   local text=$1 fresh=${2:-false} speech=${3:-} bare cmd=""
   # Whisper invents these from silence.
@@ -669,7 +651,6 @@ cmd_turn() {
     set_state thinking "waiting for the last request" "waiting for the last request"
     flock 9
   fi
-  # Shared runtime files are written only from here on, under the lock.
   trap 'rm -f "$RT/turn.portal"' EXIT
   write_atomic "$RT/turn.portal" "$PORTAL $$"
   echo $$ >"$RT/turn.pid"
@@ -849,14 +830,6 @@ cmd_open() {
   fi
 }
 
-# The phone's label is the whole tool input, laid out per tool. A layout names the
-# fields it shows; every other field is added as key: value lines (rest), so a new
-# field can't be hidden. The one field left out is Bash's description, the agent's
-# own words about its command. A tool, or an input, that no layout fits is shown
-# whole (doc). oneline, the
-# only label a notification may allow, is a Bash command short and plain enough
-# that the notification's one line shows all of it. The 20000-character cap is on
-# the label as shown, after vis.
 # shellcheck disable=SC2016 # jq, not bash
 APPROVE_JQ='
 def qk: if test("^[A-Za-z0-9_][A-Za-z0-9_.@$/-]*$") then . else tojson end;
@@ -906,9 +879,6 @@ def laid($n):
 cmd_approve() {
   local in tool short cut shown ask pick before
   in=$(cat)
-  # short (first non-empty line, 110 characters) for the desk's menu, state and log;
-  # shown ({label, short, cut, oneline}, the whole input up to 20000 characters) for the phone.
-  # tool and short are empty where the desk's menu has always had them so (input not an object).
   { IFS= read -r tool; IFS= read -r short; IFS= read -r cut; IFS= read -r shown; } < <(jq -r "$JQ_DEFS$APPROVE_JQ"'
     | .tool, .short, .cut, (del(.tool) | tojson)' <<<"$in" 2>/dev/null)
   case $tool in
@@ -950,11 +920,7 @@ cmd_approve() {
   fi
 }
 
-# shown ask cut: waits for libexec/portal to write the answer (allow or deny) to
-# approve.<id>, and prints Allow once, Deny, Refused (allowed, but cut > 0: a
-# command the phone didn't fully receive is never allowed) or Unsent (the event
-# couldn't be made, so there's nothing to wait for). shown goes in on stdin: a
-# label of control characters can pass the 128 KiB limit on one argument.
+# shown goes in on stdin: a label can pass Linux's 128 KiB limit on one argument.
 phone_approve() {
   local answer="" end event
   clock
@@ -977,7 +943,6 @@ phone_approve() {
   esac
 }
 
-# Stops whichever turn is running, from either portal.
 cmd_cancel() {
   local pid owner
   if [[ $PORTAL == desk && -e $RT/recording ]]; then
@@ -1049,7 +1014,6 @@ say_aside() {
   play "$RT/aside.wav"
 }
 
-# The pairing code libexec/portal checks: {hash: sha256 of the 6 digits, expires: epoch s, tries}.
 cmd_pair() {
   local PORTAL=desk code
   [[ $SPEAK == 1 && -x $PY && -f $VOICE ]] || { echo "glitch pair: needs speech (SPEAK=1 and a Piper voice) to say the code" >&2; return 1; }
@@ -1069,12 +1033,10 @@ cmd_unpair() {
   say_aside "Done, your phone is unpaired."
 }
 
-# A one-use CA signs the portal's certificate (ECDSA P-256, IP SAN), then its key
-# is destroyed: Chrome on Android doesn't enforce name constraints on
-# user-installed roots, so the root the phone trusts must never sign again.
-# Chrome caps lifetimes only under publicly trusted roots, so neither expires
-# (RFC 5280's 99991231235959Z); notBefore is a day back for a phone clock that
-# runs slow. Android installs a "CA certificate" only with CA:TRUE.
+# Chrome on Android ignores name constraints on user-installed roots, so the CA signs
+# once and its key is destroyed. Chrome caps lifetimes only under publicly trusted roots,
+# so neither certificate expires (RFC 5280's 99991231235959Z). notBefore is a day back
+# for a phone clock that runs slow. Android installs a "CA certificate" only with CA:TRUE.
 cmd_cert() {
   local ca="$DATA/portal/glitch-ca.crt" from to=99991231235959Z fp d
   if [[ ! $PORTAL_ADDR =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
@@ -1086,8 +1048,8 @@ cmd_cert() {
     echo "  Make a new one with: glitch cert --renew" >&2
     return 1
   fi
-  # tmpfs, so the CA key never reaches the disk (shred can't erase a btrfs file).
-  # Global, as the EXIT trap runs after this function returns.
+  # On tmpfs, so the CA key never reaches the disk: shred can't erase a file on btrfs.
+  # Not local, because the EXIT trap runs after this function returns.
   tmp=$(mktemp -d -p "$RT") || return 1
   trap 'rm -rf "$tmp"' EXIT
   trap 'exit 130' INT TERM
@@ -1131,8 +1093,7 @@ cmd_cert() {
   return 0
 }
 
-# Exits 78 (EX_CONFIG, which the unit doesn't restart on) without PORTAL_ADDR
-# or the certificate. GLITCH_PORTAL_PLAIN=1 serves plain HTTP on 127.0.0.1 (tests only).
+# 78 is EX_CONFIG, which glitch-portal.service doesn't restart on.
 cmd_portal() {
   local PORTAL=desk addr=$PORTAL_ADDR args c py=python3
   if [[ ${GLITCH_PORTAL_PLAIN:-} == 1 ]]; then

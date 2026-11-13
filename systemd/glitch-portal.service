@@ -1,15 +1,15 @@
 [Unit]
 Description=glitch portal: the phone page (HTTPS on the LAN) for the same voice companion
-# In the graphical session, so its turns get WAYLAND_DISPLAY and the session's PATH (mise's claude)
+# In the graphical session, so its turns get WAYLAND_DISPLAY and the session's PATH (mise's claude).
 PartOf=graphical-session.target
 After=graphical-session.target
 ConditionEnvironment=WAYLAND_DISPLAY
-# Off until the owner opts in: glitch cert writes this (and needs PORTAL_ADDR).
+# %D is XDG_DATA_HOME. glitch cert writes this file.
 ConditionPathExists=%D/glitch/portal/glitch-ca.crt
 
 [Service]
 ExecStart=%h/.local/bin/glitch portal
-# Turns run detached in this cgroup: a restart must not kill one mid-reply.
+# Turns run detached in this cgroup, so a restart must not kill them.
 KillMode=process
 Restart=on-failure
 RestartSec=5

@@ -1,11 +1,8 @@
-// The glitch creature as one fragment shader, in CSS px. Patterns, palettes and
-// glows are Beep Jev's (beepjev.replit.app). The eye is the pattern: texture
-// space is centred on the gaze point and magnified there. The globe edge
-// foreshortens and thins the pattern toward a soft rim, so drift reads as
-// turning. The rim's ticks, the moons and the surprised pill are drawn here too.
-// Shared by both orbs: plugin/build-shader moves the uniform lines into Qt's
-// uniform block for glitch.frag.qsb, and web/orb.js prepends a WebGL2 header.
-// orb.mjs supplies every uniform but aa.
+// The orb as one fragment shader, in CSS px. Patterns, palettes and glows are
+// Beep Jev's (beepjev.replit.app). No #version, in/out or precision here:
+// plugin/build-shader adds Qt's header and moves each `uniform` line into Qt's
+// uniform block, and web/orb.js prepends a WebGL2 header. orb.mjs sets every
+// uniform but aa.
 
 uniform vec4 primary;      // palette color1
 uniform vec4 secondary;    // palette color2
@@ -59,8 +56,8 @@ vec4 over(vec4 top, vec4 under) { return top + under * (1.0 - top.a); }
 vec4 pm(vec4 c, float a) { return vec4(c.rgb * c.a * a, c.a * a); }
 float up(float x, float a, float b) { return clamp((x - a) / max(b - a, 1e-4), 0.0, 1.0); }
 
-// Integer hash of a lattice point, so every GPU draws the same cells. p must be
-// integer-valued; the result is a multiple of 2^-24 in [0, 1).
+// Integer hash, because sin-based hashes differ per GPU and desk and phone must
+// draw the same cells. p must be integer-valued.
 uint mix32(uint x) {
     x ^= x >> 16; x *= 0x7feb352du;
     x ^= x >> 15; x *= 0x846ca68bu;

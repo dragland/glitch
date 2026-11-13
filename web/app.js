@@ -1,4 +1,3 @@
-// The phone portal (libexec/portal serves it; its docstring is the wire format).
 import { createOrbView } from "./orb.js"
 import { SAY_LAG } from "../plugin/orb.mjs"
 
@@ -20,7 +19,7 @@ let heard = "", reply = null, note = "", awaiting = 0, offering = false
 let cleared = false, typeHeard = false, since = 0, armed = 0
 let orb
 
-// Chrome fires beforeinstallprompt once per page load, and may do it during the first await below.
+// Chrome fires beforeinstallprompt once per page load, possibly during the first await below.
 addEventListener("beforeinstallprompt", e => {
   e.preventDefault()
   if (!matchMedia("(display-mode: standalone)").matches) { installer = e; if (booted) render() }
@@ -54,16 +53,15 @@ const listenLook = () => reactions.listening || null
 const restLook = () => reactions.mood?.calm || null
 const awayLook = () => reactions.mood?.sorry || null
 
-// --- audio: one context, unlocked by the first press, so later clips need no gesture ---
-
 const ac = new AudioContext()
 let unlocked = ac.state === "running", ran = unlocked
 const sounds = {}
 for (const n of ["start", "stop", "unsure"])
   sounds[n] = fetch(`/sounds/${n}.wav`).then(r => r.arrayBuffer()).then(b => ac.decodeAudioData(b)).catch(() => null)
 
-// Android takes a running context out of "running" (suspended, or Chrome's "interrupted") for a phone call,
-// audio focus loss or an output route change, and doesn't bring it back: its clock stops until resume().
+// Android takes a running context out of "running" (suspended, or Chrome's "interrupted") for a
+// phone call, audio focus loss or an output route change. It stays there, its clock stopped,
+// until resume().
 ac.addEventListener("statechange", audio)
 
 function audio() {
@@ -76,8 +74,8 @@ function audio() {
   render()
 }
 
-// A touch grants user activation on release, not on press (only a mouse's
-// pointerdown does), so a phone's first press can't start audio: it unlocks on release.
+// A touch grants user activation on release, not on press (only a mouse's pointerdown
+// does), so a phone's first press can't start audio. Audio unlocks on the release.
 function unlock() {
   if (ac.state !== "running") ac.resume().then(audio, () => {})
 }
@@ -95,13 +93,11 @@ async function chime(name) {
   if (b && ac.state === "running") sound(b)
 }
 
-// The context time of what the speaker is playing now. getOutputTimestamp reads 0 until output starts.
+// getOutputTimestamp reads 0 until output starts.
 function heardNow() {
   const o = ac.getOutputTimestamp?.()
   return o?.contextTime > 0 ? o.contextTime : ac.currentTime - (ac.outputLatency || 0)
 }
-
-// --- the orb ---
 
 const opts = {
   dpr: Math.min(2, devicePixelRatio || 1),
@@ -142,8 +138,6 @@ function show() {
   else rest()
   render()
 }
-
-// --- what the text area shows ---
 
 const mss = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`
 
@@ -250,7 +244,6 @@ const make = (tag, text, className) => {
   return e
 }
 
-// Plain text with ``` fences as code blocks and `x` as inline code; nothing else is markup.
 function format(text) {
   const out = []
   text.split(/^[ \t]*```.*$/m).forEach((part, i) => {
@@ -268,8 +261,6 @@ function format(text) {
   })
   return out
 }
-
-// --- words that arrive: each fades in at its time on a clock (seconds) ---
 
 const words = text => text.match(/\S+\s*/g) || []
 const typers = new Set()
@@ -310,9 +301,6 @@ function drop(el) {
   for (const t of typers) if (t.el === el) typers.delete(t)
 }
 
-// When each word starts, in seconds into the clip. Words share the voiced frames of the envelope
-// by their length, so the text waits while the voice pauses, and a word after punctuation starts
-// where the nearest pause ends. Linear over the clip without an envelope.
 function speechTimes(ws, ms, env) {
   const at = [0]
   for (const w of ws) at.push(at.at(-1) + w.length)
@@ -372,8 +360,6 @@ function full(r) {
   finish(r.typer)
 }
 
-// --- approvals ---
-
 const received = a => ({ ...a, got: performance.now() })
 
 function command(label) {
@@ -408,8 +394,6 @@ function commandEdges() {
   restEl.textContent = n === 1 ? "1 more line" : `${n} more lines`
 }
 labelEl.addEventListener("scroll", commandEdges, { passive: true })
-
-// --- clips: cues play on arrival, speech one at a time in arrival order ---
 
 const seen = new Set(), started = new Map()
 let queue = [], playing = null
@@ -523,8 +507,6 @@ allowEl.addEventListener("click", () => { if (performance.now() >= armed) answer
 denyEl.addEventListener("click", () => { if (performance.now() >= armed) answer(false) })
 stopEl.addEventListener("click", () => { unlock(); api("/api/cancel").catch(() => {}) })
 
-// --- events ---
-
 const LOST_MS = 3000, PROBE_MS = 3000
 let es = null, lost = 0, probing = 0, synced = false, met = false
 
@@ -624,8 +606,6 @@ probe(reached)
 addEventListener("online", () => { if (offline || !es) probe() })
 setInterval(() => { if (local === "listening" || turn) render() }, 250)
 
-// --- notifications ---
-
 const canOffer = () => "PushManager" in window && !!navigator.serviceWorker?.controller &&
   Notification.permission === "default" && !localStorage.getItem("glitch.push")
 
@@ -681,8 +661,6 @@ noEl.addEventListener("click", () => {
   render()
 })
 
-// --- the mic ---
-
 let stream = null, asking = null, analyser = null, source = null
 const samples = new Float32Array(1024)
 
@@ -704,8 +682,6 @@ function dropMic() {
   source?.disconnect()
   stream = analyser = source = null
 }
-
-// --- hold to talk: only the orb and its halo; a touch elsewhere only hushes ---
 
 let press = null, poke = null
 
@@ -828,8 +804,6 @@ async function send(blob) {
   local = null
   show()
 }
-
-// --- the screen stays on while a phone turn or the talk around it runs ---
 
 let lock = null, wantLock = false
 function wake() {

@@ -228,8 +228,6 @@ else
   else
     echo "    warning: glitch-portal isn't running (journalctl --user -u glitch-portal)"
   fi
-  # Opening the port and routing it over Tailscale need root (or the Tailscale
-  # operator), so they're the owner's to run.
   todo=()
   lan=$(ip -j -4 addr show 2>/dev/null | jq -r --arg a "$p_addr" \
     '.[] | select(.ifname != "tailscale0") | .addr_info[] | select(.local == $a) | .prefixlen' | head -1)

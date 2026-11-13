@@ -1,33 +1,34 @@
-// The orb's logic, shared by the desktop plugin (Glitch.qml) and the web orb
-// (web/orb.js): plain ES module, no host APIs, so both run the same motion.
-// Hosts feed inputs, call step(dt) once per frame and draw the frame it returns
-// with orb.glsl.
+// The orb's logic for both hosts (Glitch.qml, web/orb.js). No host APIs: it runs in
+// Qt's QML engine and in browsers.
 //
-// Two inputs:
-//   1. A state plus a Jev-style reaction (what it feels):
-//        set('{"state":"tool","reaction":{"palette":"ocean","pattern":"waves",
-//          "motion":"orbit","mood":"focused","energy":0.4}}')
-//   2. Live signals, one per line (what is happening right now):
-//        turn             a new turn: clear ticks, moons, edits
-//        tok <chars>      streamed text: the pattern drifts at token speed
-//        tool <id> <cat>  a tool call went out (look, make, run, delegate)
-//        end <id>         it came back
-//        rest             the work is over: nothing is out any more
-//        ctx <0..1>       how full the context is (the tide, shown while working)
-//        say <hz> <v>...  the loudness envelope of the line about to be spoken (v = 0..99)
-//        hush             speech stopped early
-//   Hosts also feed the mic's linear sample peak while listening, and may feed
-//   the cursor (percent of the screen) and reduced motion.
+// Inputs:
+//   set(payload)   a state and a Jev-style reaction, as JSON text or an object:
+//                    {"state":"tool","reaction":{"palette":"ocean","pattern":"waves",
+//                     "motion":"orbit","mood":"focused","energy":0.4}}
+//   event(line)    a live signal, one per line:
+//                    turn             a new turn: clear ticks, moons, edits
+//                    tok <chars>      streamed text: the pattern drifts at token speed
+//                    tool <id> <cat>  a tool call went out (look, make, run, delegate)
+//                    end <id>         it came back
+//                    rest             the work is over: nothing is out any more
+//                    ctx <0..1>       how full the context is (the tide, shown while working)
+//                    say <hz> <v>...  the loudness envelope of the line about to be spoken (v = 0..99)
+//                    hush             speech stopped early
+//   mic(level)     the mic's linear sample peak, while the frame says listening
+//   cursor(x, y)   the cursor, in percent of the screen (optional)
+//   reduceMotion(on), hide()
 //
-// createOrb({ now, persist }): now is the host's clock in seconds; the hide
-// deadlines run on it, so they hold while no frames are drawn. Without it they
-// run on step time. With persist, the orb never hides on its own (only hide()
-// hides it): it shows from the first set, idle included, and after a resting
-// state it keeps that state's look.
+// createOrb({ now, persist }): now is the host's clock in seconds. The hide deadlines
+// run on it, so they hold while no frames are drawn; without it they run on step time.
+// With persist, only hide() hides the orb: it shows from the first set, idle included,
+// and a resting state keeps its look.
 //
-// Units are the orb's CSS px: the stage is stage.size square and the orb's
-// centre sits stage.orbY above its bottom edge. A frame (step/frame) holds:
+// step(dt) advances dt seconds and returns a frame; frame() returns one without
+// advancing; wake() steps by the time since the last step. Units are the orb's CSS px:
+// the stage is stage.size square and the orb's centre sits stage.orbY above its bottom
+// edge. A frame holds:
 //   visible            draw and keep stepping; false once faded out
+//   shown              set() showed it and it hasn't started hiding
 //   wakeAt             when (on the host's clock) to call wake() if no frame has
 //                      been stepped by then, or -1
 //   listening          the host should feed mic()
@@ -73,8 +74,8 @@ function rgba(hex) {
 }
 const mixv = (a, b, u) => Array.isArray(a) ? a.map((x, i) => x + (b[i] - x) * u) : a + (b - a) * u
 
-// Timed as Qt Quick times them, so the desktop orb moves as it did: an animation
-// started during a step first moves on the next one.
+// Timed as Qt Quick times them: an animation started during a step first moves on
+// the next one.
 let stepping = false
 const begin = o => { o.fresh = stepping }
 const held = o => { if (!o.fresh) return false; o.fresh = false; return true }

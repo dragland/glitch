@@ -1,83 +1,87 @@
 #!/usr/bin/env python3
-"""glitch portal: the phone's way into the same voice companion (bin/glitch portal).
+"""glitch portal: the phone's HTTPS server, started by `glitch portal`.
 This docstring is the wire format between bin/glitch, this server, web/app.js and web/sw.js.
 
     portal --addr IP --port N --rt RT --data DATA --glitch BIN --web DIR --plugin DIR
            (--cert PEM --key PEM | --plain) [--max-seconds S]
 
 Files. Phone turns (bin/glitch with GLITCH_PORTAL=phone) write RT/phone; desk turns never do.
-  RT/phone/events.jsonl  one JSON object per line, appended under flock, relayed as SSE
-                 events named by "type". Read from the start at launch, so a restart
-                 rebuilds hello; replay has no side effects (`live` gates .played and pushes).
-  RT/phone/state.json    the phone turn's last {state, reaction, status} (bin/glitch's own)
-  RT/phone/clips/<id>    the clips (<digits>-<kind>.wav); <id>.played (played|hushed) is
-                 written here and ends bin/glitch's wait for that clip
-  RT/phone/approve.<id>  the answer (allow|deny), written here, read and removed by bin/glitch
+  RT/phone/events.jsonl  one event per line, appended by bin/glitch under flock and emptied
+                 past 1 MB when a phone turn starts. This server reads it from the start
+                 at launch, then tails it and relays each event as SSE.
+  RT/phone/state.json    the phone turn's last {state, reaction, status}; only bin/glitch reads it
+  RT/phone/clips/<id>    a clip, <id> = <digits>-<kind>.wav; a phone turn's start deletes
+                 files here older than 5 minutes
+  RT/phone/clips/<id>.played  played|hushed, written by this server; ends bin/glitch's wait
+  RT/phone/approve.<id>  allow|deny, written by this server; bin/glitch reads and removes it
   RT/phone/online        this server's pid, while a page holds /api/events
-  RT/phone/pair          {hash: sha256 of the 6 digits, expires: epoch s, tries}, made by
-                 `glitch pair`; removed when used, expired or after 5 wrong codes
+  RT/phone/pair          {hash: sha256 of the 6 digits, expires: epoch s, tries}, written by
+                 `glitch pair`; removed when used, when found expired, after 5 wrong
+                 codes, or by `glitch unpair`
   RT/phone/sounds/<name>.wav  the chimes (start, stop, unsure), rendered by `glitch portal`
-                 before it starts this server: they keep the old sound after reactions.json
-                 changes until the portal restarts
-  RT/turn.portal "<desk|phone> <pid>" while a turn runs (replaced whole); its changes reach
-                 the page as the `turn` event, which no file holds
-  DATA/portal/devices    {"<sha256 of device key>": {paired: epoch, agent, push?: endpoint}},
-                 one entry per phone; edited only under flock on devices.lock (glitch unpair
-                 takes it too and deletes the file)
+                 each time it starts this server
+  RT/turn.portal         "<desk|phone> <pid>" while a turn holds turn.lock; this server polls
+                 it and sends `turn` events, which events.jsonl doesn't hold
+  DATA/portal/devices    {"<sha256 of device key>": {paired: epoch s, agent, push?: endpoint}};
+                 edited only under flock on devices.lock, which `glitch unpair` also takes
+                 to delete the file
   DATA/portal/vapid.pem  the P-256 key that signs Web Push (VAPID, RFC 8292), made on first start
-  DATA/portal/glitch-ca.crt, cert.pem, key.pem  made by `glitch cert`: the CA file the phone
-                 installs (also what the unit's ConditionPathExists waits for), and the
-                 server's certificate and key (PORTAL_CERT, PORTAL_KEY)
+  DATA/portal/glitch-ca.crt  the CA file the phone installs, made by `glitch cert`; the unit's
+                 ConditionPathExists waits for it
+  PORTAL_CERT, PORTAL_KEY  the server's certificate and key, made by `glitch cert`
 
-Events (each carries its "type"):
-  state    {state, reaction, status, detail}  status: the status line, lowercase, shown as
-           is, or "" for none ("running journalctl", "thinking", "waiting for the last
-           request", "didn't catch that", "cancelled"); made in bin/glitch. detail is for logs.
-  signal   {line}         an orb.events line (plugin/orb.mjs), minus "say"; "turn" starts a
-                          phone turn, "rest" ends its work
+Events. Each carries its "type". bin/glitch writes all but `turn` and `hello`.
+  state    {state, reaction, status, detail}  status: the status line, shown as is, or ""
+           ("running journalctl", "thinking", "waiting for the last request", "didn't
+           catch that", "cancelled"); detail: for logs
+  signal   {line}         an orb.events line (plugin/orb.mjs) other than "say"; "turn" starts
+                          a phone turn, "rest" ends its work
   heard    {text}         a phone turn started on this text
-  clip     {id, url, kind, ms, env, with, delay, approve}  (below)
-  reply    {summary, body, speech}  summary: the spoken line (or the one that would be
-           spoken; "" when there is none); body: the full reply or the error, up to 4000
-           characters; speech: whether a say clip follows
-  approve  {id, ask, label, short, cut, oneline, timeout, left}  ask: the question to show;
-           label: the whole tool input, up to 20000 characters: "<Tool>: " and a layout for
-           Bash/Shell (the command), Write, Edit, MultiEdit, NotebookEdit, WebFetch and
-           WebSearch, with any field the layout doesn't show as key: value lines (only Bash's
-           description is left out), else "<Tool>:" and every field as key: value lines;
+  clip     {id, url, kind, ms, env, with, delay, approve}  see Clips; this server adds url
+  reply    {summary, body, speech}  summary: the spoken line, the one that would be spoken,
+           or ""; body: the full reply or the error, up to 4000 characters; speech: whether
+           a say clip follows
+  approve  {id, ask, label, short, cut, oneline, timeout, left}
+           ask: the question to show.
+           label: the whole tool input, up to 20000 characters. Bash/Shell (the command),
+             Write, Edit, MultiEdit, NotebookEdit, WebFetch and WebSearch get "<Tool>: "
+             and a layout, then every field the layout doesn't show as key: value lines
+             (Bash's description is the one field left out). Any other tool or input gets
+             "<Tool>:" and every field as key: value lines.
            short: "<Tool>: " and up to 110 characters of one field's first non-empty line
-           (the desk's menu title; the notification's text); in both, characters that show as
-           nothing or as a plain space are shown as \\u{hex} (bin/glitch's vis); cut: the
-           characters left out of label (> 0 means it can't be allowed here); oneline: the
-           only approval a notification may offer Allow for: a Bash/Shell command with no
-           field but its description, cut 0, label == short and at most 40 characters ("Bash: "
-           included), nothing vis changed, no tab, no leading, trailing or doubled whitespace (decided in bin/glitch; the page and worker only
-           read it); timeout: s in all; left: s still to go when sent (events.jsonl carries
-           `since`, CLOCK_BOOTTIME s, from which this server works it out)
+             (the desk's menu title, the notification's text); "" when the input is
+             neither an object nor null.
+           In label and short, bin/glitch's vis writes each character that shows as nothing
+             or as a plain space as \\u{HEX}.
+           cut: the characters left out of label; > 0 means it can't be allowed.
+           oneline: true only for a Bash/Shell command with no field but its description,
+             cut 0, label == short, at most 40 characters with the "<Tool>: " prefix,
+             unchanged by vis, with no tab and no leading, trailing or doubled whitespace.
+             Only a oneline approval lets a notification offer Allow. bin/glitch decides
+             it; the page and the worker only read it.
+           timeout: seconds in all. left: seconds still to go when sent; events.jsonl
+             carries `since` (CLOCK_BOOTTIME s) instead, and this server works left out.
   approved {id, answer}   allow|deny|none
   hush     {}
   turn     {turn}         desk|phone|null, when RT/turn.portal changes
   hello    {state, turn, approve: [approve...], heard, reply, replay: [clip...]}  first on
-           every /api/events stream: the last state event, heard text and reply event, the pending
-           approvals and the speech clips not yet played. A new turn on either portal drops
-           the earlier turn's unplayed speech from replay.
+           every /api/events stream: the last state event, heard text and reply event, the
+           pending approvals and the speech clips not yet played. A new turn on either
+           portal drops the earlier turn's unplayed speech from replay.
 
-Clips: kind is cue, say, ask or aside; ms its length; env the orb's "say" payload
-("<hz> <v>...") or null; url "/clips/<id>". A cue plays on arrival, over anything,
-like the desk's beeps. Speech (say, ask, aside) plays one clip at a time in arrival
-order, and the page POSTs /api/played {id} when each one ends: the turn waits for
-that (or for ms + 2 s, or not at all with no page connected), as the desk waits for
-its speaker, so the next state comes after the speech. A clip whose `with` is set
-starts `delay` ms after clip `with` started (the desk's contour cue leading into
-speech) instead of queueing, or at once if that moment has passed. An ask clip
-belongs to approval `approve`: it is dropped once that is answered, and the page
-stops it on `approved`.
+Clips. kind: cue, say, ask or aside. ms: its length. env: the orb's "say" payload
+("<hz> <v>...") or null. url: "/clips/<id>". A cue plays on arrival, over anything.
+Speech (say, ask, aside) plays one clip at a time in arrival order, and the page POSTs
+/api/played {id} when each one ends. bin/glitch waits for that, for ms + 2 s at most,
+or not at all with no page connected. A clip with `with` set starts no sooner than
+`delay` ms after clip `with` started. An ask clip belongs to approval `approve`: this
+server drops it once that is answered, and the page stops it on `approved`.
 
-Routes. Every request: Host must be ADDR:PORT (else 421); every POST: Origin must be this
-origin (else 403). /api/* and /clips/* refuse navigations (Sec-Fetch-Mode navigate or
-Sec-Fetch-Dest document: 403) and treat a cross-site or same-site Sec-Fetch-Site as
-unpaired. Without a paired cookie, anything but the public routes gets 401 under
-/api/ and /clips/, else 303 to /pair. Errors are {error}. Every response has
+Routes. Every request: Host must be ADDR:PORT, else 421. Every POST: Origin must be this
+origin, else 403. /api/* and /clips/* answer navigations (Sec-Fetch-Mode navigate or
+Sec-Fetch-Dest document) with 403, and treat a cross-site or same-site Sec-Fetch-Site as
+unpaired. Without a paired cookie, a non-public GET outside /api/ and /clips/ gets 303 to
+/pair, and any other non-public request gets 401. Errors are {error}. Every response has
 Content-Security-Policy default-src 'self'; frame-ancestors 'none', plus hashes for an
 HTML page's inline <style> and <script> blocks.
   public  GET /pair (the pairing page), /manifest.webmanifest, /icon-*.png
@@ -85,26 +89,29 @@ HTML page's inline <style> and <script> blocks.
   GET  /, web/* files   the page; HTML sets the cookie again (glitch_device, HttpOnly,
                         Secure, SameSite=Lax: a home-screen launch sends no Strict cookie)
   GET  /plugin/orb.mjs, /plugin/orb.glsl, /sounds/<name>.wav, /clips/<id>
-  GET  /api/events      SSE: "retry: 2000", hello, the events, ": ping" every 5 s
+  GET  /api/events      SSE: "retry: 2000", hello, the events, ": ping" every 5 s; ends
+                        once the device is unpaired
   GET  /api/reactions   the merged reactions.json (`glitch _reactions`)
   GET  /api/notice      {approve: [approve...], reply: {summary} | null}, for the service
-                        worker: reply is set while a reply's speech went unheard
+                        worker. reply is set from a reply until its say clip ends or the
+                        next turn starts; with a page connected, a reply without a say
+                        clip clears after 3 s.
   GET  /api/push        {key}, the applicationServerKey (404 with no VAPID key)
   POST /api/push        {endpoint} stores this device's subscription (null forgets it); 422
-                        for an endpoint outside PUSH_HOSTS
+                        for an endpoint outside PUSH_HOSTS, or with no VAPID key
   POST /api/talk        a recording (Content-Type one of AUDIO, up to 50 MiB) -> {outcome}:
                         turn, fresh ("new chat" alone), empty (nothing heard) or error;
-                        415 type, 413 size, 422 undecodable, 500 transcription failed
-  POST /api/approve     {id, allow: bool} -> {ok}; 409 not pending; 422 allow with cut > 0
+                        415 type, 413 empty or too big, 422 undecodable, 500 transcription failed
+  POST /api/approve     {id, allow: bool} -> {ok}; 409 not pending or allow not a bool;
+                        422 allow with cut > 0
   POST /api/cancel      stops the running turn, whichever portal started it -> {ok}
   POST /api/played      {id}: that clip ended; no id: hush every unplayed one -> {ok}
 
-Push: the messages carry no payload (no encryption, nothing readable at the push
-service), so the service worker asks GET /api/notice what to show. due() decides
-when to push: "needs you" once an approval waits NEED_AFTER s, "settled" when one
-it pushed for ends unanswered (timed out, or its turn ended), "finished" once a
-reply's speech went unplayed (no page for UNHEARD_AFTER s, or a page that didn't
-play it within its length + 5 s).
+Push. Pushes carry no payload, so the service worker asks GET /api/notice what to show.
+Each goes to every device with an endpoint. due() pushes "needs" once an approval has
+waited NEED_AFTER s, "settled" when one it pushed for ends unanswered (timed out, or its
+turn ended), and "finished" when a reply's speech goes unplayed: no page for UNHEARD_AFTER s,
+or a page that didn't play it within its length + 5 s.
 """
 
 import argparse
@@ -158,7 +165,7 @@ TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript", ".mjs": 
          ".webmanifest": "application/manifest+json"}
 APPROVE_FIELDS = ("id", "ask", "label", "short", "cut", "oneline", "timeout")
 CSP = "default-src 'self'; frame-ancestors 'none'"
-# An inline block, with or without attributes; a <script src> is loaded under 'self', not by hash.
+# CSP hashes cover inline blocks only; a <script src> loads under 'self'.
 INLINE = re.compile(rb"<(style|script)(\s[^>]*)?>(.*?)</\1\s*>", re.DOTALL | re.IGNORECASE)
 SRC = re.compile(rb"\ssrc\s*=", re.IGNORECASE)
 
@@ -202,7 +209,6 @@ def write_atomic(path, text, mode=0o600):
 
 
 def shown(a):
-    # A pending approval as the page and the service worker get it.
     left = a.get("timeout") or 0
     if isinstance(a.get("since"), (int, float)):
         left = max(0, round(left - (time.clock_gettime(time.CLOCK_BOOTTIME) - a["since"])))
@@ -263,7 +269,6 @@ class Portal:
         self.dev_lock = threading.Lock()
         self.pushes = queue.Queue()
         self.vapid = None
-        # Tests only, and only with --plain: one more push origin (a local stand-in).
         self.push_test = os.environ.get("GLITCH_PORTAL_PUSH_TEST") if a.plain else None
         self.pos = 0
         self.live = False
@@ -605,8 +610,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(421, {"error": "host"})
         if method == "POST" and self.headers.get("Origin") != f"{self.p.scheme}://{self.p.host}":
             return self.send_json(403, {"error": "origin"})
-        # A top-level navigation carries the SameSite=Lax cookie from any site, and
-        # would count as a connected page: the API answers only the page's own fetches.
+        # Browsers send a SameSite=Lax cookie with a top-level navigation from any site.
         api = path.startswith(("/api/", "/clips/"))
         if api and (self.headers.get("Sec-Fetch-Mode") == "navigate" or self.headers.get("Sec-Fetch-Dest") == "document"):
             return self.send_json(403, {"error": "navigation"})
@@ -793,12 +797,11 @@ class Handler(BaseHTTPRequestHandler):
     def send(self, code, data, ctype="text/plain", headers=None):
         csp = CSP
         if ctype.startswith("text/html"):
-            # Inline <style> and <script> blocks are allowed by hash, nothing else inline.
             src = {}
             for tag, attrs, body in INLINE.findall(data):
                 if SRC.search(attrs):
                     continue
-                # Browsers hash the block after turning CRLF and CR into LF, so a CRLF checkout still matches.
+                # Browsers hash the block after turning CRLF and CR into LF.
                 body = body.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
                 src.setdefault(tag.decode().lower(), []).append(
                     f"'sha256-{base64.b64encode(hashlib.sha256(body).digest()).decode()}'")
@@ -820,17 +823,13 @@ class Handler(BaseHTTPRequestHandler):
 class Server(ThreadingHTTPServer):
     daemon_threads = True
 
-    # Until a connection shows a paired cookie it is unpaired, counted per host and
-    # in total so that strangers can't take every slot. A host that showed one in
-    # the last KNOWN_SECONDS, for a device still paired (the phone), is left out of
-    # the total but keeps its own per-host cap.
     def __init__(self, *args):
         super().__init__(*args)
         self.slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
         self.guard = threading.Lock()
         self.hosts = {}
         self.loose = {}
-        self.known = {}  # host -> (CLOCK_BOOTTIME s of its last paired cookie, that device's hash)
+        self.known = {}
 
     def is_known(self, host):
         seen, device = self.known.get(host, (None, None))
