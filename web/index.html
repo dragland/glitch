@@ -8,46 +8,76 @@
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" href="/icon-192.png">
 <style>
-  html, body { margin: 0; height: 100%; overflow: hidden; background: #0a0b0e; color: #6b7079;
-    font: 15px/1.45 system-ui, sans-serif; -webkit-tap-highlight-color: transparent;
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0a0b0e; color: #9ba0a8;
+    font: 1rem/1.45 system-ui, sans-serif; -webkit-tap-highlight-color: transparent;
     user-select: none; -webkit-user-select: none; -webkit-touch-callout: none }
   canvas { position: fixed; inset: 0; width: 100%; height: 100%; touch-action: none }
-  #text { position: fixed; left: 0; right: 0; top: calc(42dvh + min(31vw, 23dvh)); padding: 0 32px;
-    text-align: center; pointer-events: none; transition: opacity .3s }
-  #text.body { pointer-events: auto }
-  #text.dim { opacity: .35 }
-  #text p { margin: 0 auto; max-width: 30em; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical }
-  #heard { -webkit-line-clamp: 1; line-clamp: 1 }
-  #line { -webkit-line-clamp: 2; line-clamp: 2; color: #aab0b9; margin-top: 4px }
-  #body { position: fixed; left: 20px; right: 20px; bottom: calc(24px + env(safe-area-inset-bottom)); max-height: 38dvh;
-    overflow: auto; margin: 0 auto; max-width: 34em; white-space: pre-wrap; font-size: 13px; color: #8a8f98;
-    user-select: text; -webkit-user-select: text }
-  #ask { position: fixed; left: 0; right: 0; bottom: calc(36px + env(safe-area-inset-bottom)); text-align: center; padding: 0 24px }
-  #label { margin: 0 auto 18px; max-width: 30em; color: #c4c8cf; font: 13px/1.4 ui-monospace, monospace;
-    overflow-wrap: anywhere; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3 }
-  button { font: inherit; color: #d8dbe0; background: none; border: 1px solid #2a2d33; border-radius: 99px;
-    padding: 12px 0; width: 9.5em; margin: 0 5px }
+  #ui { position: fixed; inset: 0; display: flex; flex-direction: column; pointer-events: none;
+    padding-bottom: env(safe-area-inset-bottom) }
+  #text { flex: 1 1 0; min-height: 0; margin-top: var(--top, 60dvh); padding: 0 28px 20px; overflow-y: auto;
+    overscroll-behavior: contain; touch-action: pan-y; pointer-events: auto; text-align: center; scrollbar-width: none }
+  #text.below { -webkit-mask-image: linear-gradient(#000 calc(100% - 56px), transparent);
+    mask-image: linear-gradient(#000 calc(100% - 56px), transparent) }
+  #text.above { -webkit-mask-image: linear-gradient(transparent, #000 32px); mask-image: linear-gradient(transparent, #000 32px) }
+  #text.above.below { -webkit-mask-image: linear-gradient(transparent, #000 32px, #000 calc(100% - 56px), transparent);
+    mask-image: linear-gradient(transparent, #000 32px, #000 calc(100% - 56px), transparent) }
+  #text p { margin: 0 auto; max-width: 24em; overflow-wrap: anywhere }
+  #said { font-size: 1.0625rem; color: #a9aeb6 }
+  #line { font-size: 1.25rem; line-height: 1.4; color: #eceef1 }
+  #line.status { font-size: .9375rem; color: #9ba0a8; font-variant-numeric: tabular-nums }
+  #said:not(:empty) + #line:not(:empty) { margin-top: 10px }
+  .w { opacity: 0; transition: opacity .22s ease-out }
+  .w.on { opacity: 1 }
+  #hint { margin-top: 12px !important; font-size: .875rem; color: #9ba0a8 }
+  #more { max-width: 34em; margin: 22px auto 0; text-align: left; font-size: 1rem; line-height: 1.55; color: #b4b9c0;
+    user-select: text; -webkit-user-select: text; animation: in .4s ease-out }
+  #more p { margin: 0 0 12px; max-width: none }
+  #more pre { margin: 0 0 12px; padding: 10px 12px; background: #13151a; border-radius: 10px; overflow-x: auto;
+    white-space: pre; scrollbar-width: none; font: .8125rem/1.5 ui-monospace, monospace; color: #c9cdd3 }
+  #more code { font: .875rem ui-monospace, monospace; color: #c9cdd3; background: #13151a; padding: 1px 5px; border-radius: 5px }
+  @keyframes in { from { opacity: 0 } }
+  #foot { flex: 0 1 auto; min-height: 0; display: flex; flex-direction: column; align-items: center; padding: 8px 20px 24px;
+    text-align: center }
+  #foot > * { pointer-events: auto }
+  button { font: inherit; color: #d8dbe0; background: none; border: 1px solid #2a2d33; border-radius: 99px; padding: 12px 0 }
   button:active { background: #16181d }
   button:disabled { opacity: .4 }
-  #away, #offer { position: fixed; left: 0; right: 0; bottom: calc(36px + env(safe-area-inset-bottom)); text-align: center }
+  #stop { padding: 9px 26px; font-size: .9375rem; color: #a9aeb6; margin-top: 4px }
+  #ask { width: 100%; max-width: 34em; min-height: 0; display: flex; flex-direction: column }
+  #q { flex: none; margin: 0 0 10px; color: #eceef1; font-size: 1.0625rem }
+  #n { display: block; margin-top: 2px; color: #9ba0a8; font-size: .8125rem }
+  #cmd { min-height: 0; display: flex; flex-direction: column; margin: 0 0 14px; background: #13151a; border-radius: 10px;
+    overflow: hidden }
+  #label { margin: 0; min-height: 4.2em; max-height: 21dvh; overflow: auto; overscroll-behavior: contain; text-align: left; white-space: pre-wrap;
+    overflow-wrap: anywhere; padding: 10px 12px; color: #c9cdd3; font: .8125rem/1.45 ui-monospace, monospace;
+    user-select: text; -webkit-user-select: text }
+  #drain { height: 2px; background: #3a3e46; transform-origin: left }
+  #ask .row { flex: none; display: flex; gap: 10px }
+  #ask .row button { flex: 1; padding: 14px 0 }
+  #allow { border-color: #d8dbe0; background: #d8dbe0; color: #0a0b0e }
+  #allow:active { background: #fff }
   #away a { display: inline-block; color: #d8dbe0; text-decoration: none; border: 1px solid #2a2d33; border-radius: 99px;
     padding: 12px 26px }
   #away a:active { background: #16181d }
-  #offer { font-size: 13px; color: #50545c }
-  #offer button { width: auto; border: 0; margin: 0; padding: 12px 8px; color: #8a8f98 }
-  #cancel, #install { position: fixed; top: env(safe-area-inset-top); right: 0; width: auto; border: 0; margin: 0;
-    padding: 18px 20px; font-size: 13px; color: #50545c }
-  #install { right: auto; left: 0 }
+  #offer { font-size: .875rem; color: #9ba0a8 }
+  #offer button { border: 0; padding: 12px 8px; color: #d8dbe0 }
+  #install { position: fixed; top: env(safe-area-inset-top); left: 0; border: 0; padding: 18px 20px; font-size: .8125rem; color: #9ba0a8 }
+  #spoken { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%) }
   [hidden] { display: none !important }
 </style>
-<canvas id="orb"></canvas>
-<div id="text"><p id="heard"></p><p id="line"></p></div>
-<div id="body" hidden></div>
-<div id="ask" hidden><p id="label"></p><button id="allow">Allow once</button><button id="deny">Deny</button></div>
-<button id="cancel" hidden>cancel</button>
+<canvas id="orb" role="button" aria-label="glitch: hold to talk"></canvas>
+<div id="ui">
+  <div id="text"><p id="said"></p><p id="line"></p><p id="hint" hidden>tap the orb to hear it</p><div id="more" hidden></div></div>
+  <div id="foot">
+    <div id="ask" hidden><p id="q"><span id="qt"></span><span id="n" hidden></span></p><div id="cmd"><pre id="label"></pre><div id="drain"></div></div>
+      <div class="row"><button id="deny">Deny</button><button id="allow">Allow once</button></div></div>
+    <button id="stop" hidden>stop</button>
+    <!-- Chrome for Android: intent:, and only to a BROWSABLE activity (Tailscale's tailscale://navigate). -->
+    <div id="away" hidden><a href="intent://navigate#Intent;scheme=tailscale;package=com.tailscale.ipn;S.browser_fallback_url=https%3A%2F%2Fplay.google.com%2Fstore%2Fapps%2Fdetails%3Fid%3Dcom.tailscale.ipn;end">Open Tailscale</a></div>
+    <div id="offer" hidden>Notify you when I finish?<button id="yes">Yes</button><button id="no">No</button></div>
+  </div>
+</div>
+<p id="spoken" aria-live="polite"></p>
 <button id="install" hidden>install</button>
-<!-- Chrome for Android: intent:, and only to a BROWSABLE activity (Tailscale's tailscale://navigate). -->
-<div id="away" hidden><a href="intent://navigate#Intent;scheme=tailscale;package=com.tailscale.ipn;S.browser_fallback_url=https%3A%2F%2Fplay.google.com%2Fstore%2Fapps%2Fdetails%3Fid%3Dcom.tailscale.ipn;end">Open Tailscale</a></div>
-<div id="offer" hidden>Notify you when I finish?<button id="yes">Yes</button><button id="no">No</button></div>
 <script type="module" src="/app.js"></script>
 </html>

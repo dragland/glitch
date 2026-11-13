@@ -103,7 +103,7 @@ async function woke(answered) {
   // A push without a payload can't say which it was, so out of reach it's one text for both.
   if (!n) return show("glitch", "Something's waiting at home.")
   const a = n.approve?.[0]
-  if (a) return show("glitch needs you", a.label, {
+  if (a) return show("glitch needs you", brief(a.label), {
     data: { id: a.id }, requireInteraction: true,
     actions: [{ action: "allow", title: "Allow once" }, { action: "deny", title: "Deny" }]
   })
@@ -111,6 +111,11 @@ async function woke(answered) {
   const left = await self.registration.getNotifications({ tag: TAG })
   if (!answered && left.some(x => x.data?.id)) return show("glitch", "No longer waiting for you.", { silent: true, renotify: false })
   for (const x of left) x.close()
+}
+
+function brief(label, max = 120) {
+  const first = label.split("\n")[0], chars = Array.from(first)
+  return chars.length > max || first !== label ? chars.slice(0, max - 1).join("").trimEnd() + "…" : label
 }
 
 function show(title, body, opts = {}) {
