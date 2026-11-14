@@ -17,7 +17,8 @@
 #   glitch cert [--renew]  make the portal's certificate, and the CA file the phone installs
 #
 # Defaults in <repo>/config, overrides in ~/.config/glitch, downloads in
-# ~/.local/share/glitch, live state in $XDG_RUNTIME_DIR/glitch.
+# ~/.local/share/glitch, live state in $XDG_RUNTIME_DIR/glitch, the reply card's
+# record in ~/.local/state/glitch.
 
 set -uo pipefail
 export LC_CTYPE=${LC_CTYPE:-C.UTF-8} # string slicing below must count characters
@@ -27,6 +28,8 @@ DATA="${XDG_DATA_HOME:-$HOME/.local/share}/glitch"
 USER_CONF="${XDG_CONFIG_HOME:-$HOME/.config}/glitch"
 RT="${XDG_RUNTIME_DIR:-/run/user/$UID}/glitch"
 mkdir -p "$RT"
+CARD="$RT/card"
+[[ $RT == "/run/user/$UID/glitch" ]] && CARD="${XDG_STATE_HOME:-$HOME/.local/state}/glitch/card"
 
 # shellcheck source=../config/glitch.conf
 . "$GLITCH_HOME/config/glitch.conf"
@@ -44,8 +47,8 @@ CUE="$GLITCH_HOME/libexec/cue"
 DECIDE="$GLITCH_HOME/libexec/decide"
 SPEAK_HELPER="$GLITCH_HOME/libexec/speak"
 
-# Every detached child closes fds 8 (key.lock) and 9 (turn.lock): an inherited
-# fd keeps the flock held after its owner exits.
+# Every detached child closes fds 8 (key.lock) and 9 (turn.lock), and the mutter's
+# children close 6 (mutter.lock): an inherited fd keeps the flock held after its owner exits.
 
 if [[ -f $RT/glitch.log ]] && (($(wc -l <"$RT/glitch.log") > 2000)); then
   tail -n 1000 "$RT/glitch.log" >"$RT/glitch.log.tmp" && mv "$RT/glitch.log.tmp" "$RT/glitch.log"
@@ -253,10 +256,10 @@ chime() {
 
 speech_warm() {
   SPEAK_SLOT="$RT/${1:-say}"
-  rm -f "$SPEAK_SLOT.wav" "$SPEAK_SLOT.env" "$SPEAK_SLOT.fifo"
+  rm -f "$SPEAK_SLOT.wav" "$SPEAK_SLOT.env" "$SPEAK_SLOT.ruby" "$SPEAK_SLOT.fifo"
   [[ $SPEAK == 1 && -x $PY && -f $VOICE ]] || return 0
   mkfifo "$SPEAK_SLOT.fifo" || return 0
-  "$PY" -I "$SPEAK_HELPER" "$VOICE" "$SPEAK_SLOT.fifo" "$SPEAK_SLOT.wav" </dev/null >/dev/null 2>>"$RT/glitch.log" 8>&- 9>&- &
+  "$PY" -I "$SPEAK_HELPER" "$VOICE" "$SPEAK_SLOT.fifo" "$SPEAK_SLOT.wav" </dev/null >/dev/null 2>>"$RT/glitch.log" 6>&- 8>&- 9>&- &
   SPEAK_PID=$!
 }
 
@@ -318,14 +321,24 @@ notify() {
     return 0
   }
   [[ $id =~ ^[0-9]+$ ]] && printf '%s' "$id" >"$RT/notify.id"
-  printf '%s' "$1" >"$RT/notify.summary"
+  mkdir -p "${CARD%/*}" && printf '%s' "${1//$'\n'/ }" >"$CARD"
 }
 
 close_card() {
-  local summary
-  summary=$(cat "$RT/notify.summary" 2>/dev/null) || return 0
-  [[ -n $summary ]] && omarchy-shell -q notifications dismiss "$summary" >/dev/null 2>&1
-  rm -f "$RT/notify.id" "$RT/notify.summary"
+  local summary answer
+  summary=$(cat "$CARD" 2>/dev/null) || return 0
+  if [[ -n $summary ]]; then
+    answer=$(omarchy-shell notifications dismiss "$summary" 2>/dev/null)
+    # A shell that has just started says "none" until it has restored its cards.
+    [[ $answer == ok || ($answer == none && $(ps -o etimes= -C quickshell | sort -n | tail -n 1) -ge 30) ]] || return 1
+  fi
+  rm -f "$RT/notify.id" "$CARD"
+}
+
+card_sweep() {
+  [[ -e $CARD && -z $(turn_portal) ]] || return 0
+  [[ -e $RT/notify.id ]] && ((EPOCHSECONDS - $(stat -c %Y "$RT/sid" 2>/dev/null || echo 0) < RESUME_WINDOW + 60)) && return 0
+  close_card && log "card swept"
 }
 
 expire_later() {
@@ -382,12 +395,90 @@ stop_live() {
   grep -qs libexec/decide "/proc/$pid/cmdline" && kill "$pid" 2>/dev/null
 }
 
+# --- the trace and the mutter ----------------------------------------------------------
+
+# These patterns backtrack quadratically over a long run of spaces, so the cut comes first.
+# shellcheck disable=SC2016 # jq, not bash
+TRACE_JQ='def shown: tostring | .[0:4000] | [splits("\n") | select(test("^\\s*(SAY|MOOD):") | not)] | join("\n")
+  | gsub("\\*\\*|`"; "") | gsub("\\s*\n\\s*"; "\n") | sub("^\\s+"; "") | sub("\\s+$"; "") | clip(400);'
+
+trace() {
+  [[ $PORTAL == phone ]] || return 0
+  phone_send "$(jq -c --arg k "$1" "$JQ_DEFS$TRACE_JQ"'{type:"trace", kind:$k, text:shown} | select(.text != "")' <<<"$2" 2>/dev/null)"
+}
+
+working() {
+  [[ -e $RT/turn.pid ]] && ! recording && [[ $(jq -r .state "$(state_file)" 2>/dev/null) =~ ^(thinking|tool)$ ]]
+}
+
+mutter() {
+  [[ $SPEAK == 1 && -x $PY && -n $MUTTER_VOICE && -f $MUTTER_VOICE ]] || return 1
+  ((EPOCHSECONDS - LAST_MUTTER >= MUTTER_EVERY)) && working || return 1
+  [[ $PORTAL == desk ]] || page_online || return 1
+  LAST_MUTTER=$EPOCHSECONDS
+  "$0" _mutter <<<"$1" >/dev/null 2>>"$RT/glitch.log" 8>&- 9>&- &
+}
+
+# The thought comes on stdin: Linux caps one argument at 128 KiB.
+cmd_mutter() {
+  THOUGHT=$(cat)
+  exec 6>"$RT/mutter.lock"
+  if flock -n 6; then
+    echo $$ >"$RT/mutter.pid"
+    # bash runs a trap only once the child it is waiting on has gone.
+    trap 'trace think "$THOUGHT"; exit 0' TERM
+    mutter_once && return 0
+    trap - TERM
+  fi
+  trace think "$THOUGHT"
+}
+
+mutter_once() {
+  local zh id event rest ruby
+  jq -r . <<<"$THOUGHT" | "$PY" -I "$GLITCH_HOME/libexec/mandarin" >"$RT/mutter.json" 2>>"$RT/glitch.log" 6>&-
+  zh=$(jq -r '.zh // ""' "$RT/mutter.json" 2>/dev/null)
+  [[ -n $zh ]] || return 1
+  log "mutter $zh"
+  VOICE=$MUTTER_VOICE speech_warm mutter
+  speech_render "$zh"
+  [[ -s $RT/mutter.wav ]] && working || return 1
+  if [[ $PORTAL == phone ]]; then
+    id="${EPOCHREALTIME/./}-mutter.wav"
+    cp "$RT/mutter.wav" "$PH/clips/$id" || return 1
+    ruby=$(cat "$RT/mutter.ruby" 2>/dev/null)
+    event=$(jq -c --arg id "$id" --argjson ruby "${ruby:-[]}" '{type:"trace", kind:"zh", text:.en, zh, ruby:$ruby, clip:$id}' "$RT/mutter.json") || return 1
+    rest=$(jq -c '.rest | select(. != "")' "$RT/mutter.json")
+    trap - TERM
+    [[ -n $rest ]] && trace think "$rest"
+    phone_send "$event"
+    clip_sent mutter "$id" "$(cat "$RT/mutter.env" 2>/dev/null)"
+    sleep $(((CLIP_MS + 999) / 1000)) 6>&-
+  else
+    trap - TERM
+    [[ -s $RT/mutter.env ]] && ev "say $(<"$RT/mutter.env")"
+    pw-play --volume "$MUTTER_VOLUME" "$RT/mutter.wav" 2>/dev/null 6>&-
+  fi
+}
+
+stop_mutter() {
+  local pid kids=() playing=""
+  pid=$(cat "$RT/mutter.pid" 2>/dev/null) || return 0
+  rm -f "$RT/mutter.pid"
+  grep -qs _mutter "/proc/$pid/cmdline" || return 0
+  pgrep -P "$pid" -x pw-play >/dev/null && playing=1
+  mapfile -t kids < <(pgrep -P "$pid")
+  kill "$pid" "${kids[@]}" 2>/dev/null
+  [[ -n $playing ]] && PORTAL=desk ev hush
+}
+
 # --- agent adapters ---------------------------------------------------------------
 # An adapter reads the prompt on stdin, takes an optional session id, and emits
 # lines: "sid <id>", "mode <permission mode>", "tool <category>\t<id>\t<label>\t<phrase>",
 # "toolend <id>", "words <text>", "ctx <tokens in context>", "window <context
 # window>", "say <text>", "mood <word>", "result <json string>", "error <text>",
-# "denied <n>", then "exit <status>" last. Tool categories: look, make, run,
+# "think <json string>", "note <json string>", "denied <n>", then "exit <status>" last.
+# `think` is a whole thought (a summary of the agent's reasoning) and `note` a whole
+# message it wrote. Tool categories: look, make, run,
 # delegate. The phrase is the phone's status line (jq `status`). A subagent's own
 # tool calls are dropped. `toolend` comes when the call's work is done, which for a
 # background subagent is later than its tool result. `ctx` and `window` are Claude's
@@ -403,10 +494,12 @@ adapter_claude() {
     '{hooks: {PermissionRequest: [{matcher: "*", hooks: [{type: "command", command: $cmd, timeout: $wait}]}]}}')
   args=(-p --output-format stream-json --verbose --include-partial-messages
     --permission-mode auto --permission-prompts none --settings "$hook" --chrome
+    --thinking-display summarized
     --append-system-prompt "$(voice_prompt)")
   [[ -n $sid ]] && args+=(--resume "$sid")
   # stream-json requires --verbose. SIGINT ends a turn cleanly (SIGTERM leaves
-  # it unrecorded).
+  # it unrecorded). -p hides thinking unless --thinking-display asks for its summaries.
+  # `claude --help` doesn't list that flag, so re-check it when Claude changes.
   timeout --signal=INT --kill-after=15 "$TURN_TIMEOUT" claude "${args[@]}" 2>>"$RT/glitch.log" 9>&- |
     jq --unbuffered -rR "$JQ_DEFS"'fromjson? // empty |
     def tlabel: .name + (
@@ -423,7 +516,11 @@ adapter_claude() {
       (.event.delta // {} | (.text // .thinking // empty) | "words \(gsub("\\s+"; " "))")
     elif .type == "system" and .subtype == "init" then "sid \(.session_id)", "mode \(.permissionMode // "?")"
     elif .type == "assistant" and .parent_tool_use_id == null then
-      (.message.content[]? | select(.type == "tool_use") | "tool \(tcat)\t\(.id | id)\t\(tlabel)\t\(status(.name; .input))"),
+      (.message.content[]? |
+        if .type == "tool_use" then "tool \(tcat)\t\(.id | id)\t\(tlabel)\t\(status(.name; .input))"
+        elif .type == "thinking" then .thinking // "" | select(test("\\S")) | "think \(tojson)"
+        elif .type == "text" then .text // "" | select(test("\\S")) | "note \(tojson)"
+        else empty end),
       (.message.usage // empty | "ctx \((.input_tokens // 0) + (.cache_read_input_tokens // 0) + (.cache_creation_input_tokens // 0))")
     elif .type == "user" and .parent_tool_use_id == null then
       # The result of a background subagent only says it was launched; the
@@ -499,7 +596,8 @@ adapter_codex() {
       elif .type == "item.started" then .item | tool
       elif .type == "item.completed" then .item |
         if .type == "agent_message" or .type == "reasoning" then
-          (.text | plain | select(. != "") | "words \(gsub("\\s+"; " "))")
+          (if .type == "reasoning" then "think" else "note" end) as $k |
+          (.text | plain | select(. != "") | "words \(gsub("\\s+"; " "))", "\($k) \(tojson)")
         elif $s.seen[.id] then toolend
         else tool, toolend end
       elif .type == "turn.failed" then "error \(.error.message // "turn failed" | gsub("\n"; " "))"
@@ -570,6 +668,7 @@ cmd_start() {
   [[ ${1:-} == --new ]] && touch "$RT/force-new"
   stamp=${EPOCHREALTIME/./}
   printf '%s' "$stamp" >"$RT/recording"
+  stop_mutter
   voxtype record start --file="$RT/utterance.txt" --no-osd 2>>"$RT/glitch.log"
   REACTION=$(reaction listening)
   set_state listening
@@ -648,7 +747,7 @@ heard() {
 cmd_turn() {
   local text=$1 fresh=${2:-false} agent kind rest result="" say="" mood="" denied=0
   local failed="" exit_code="" replied=false body words="" activity="" last_decide=0 fin
-  local tcat id status window contour lead=0.4
+  local tcat id status window contour lead=0.4 note=""
   exec 9>"$RT/turn.lock"
   if [[ -z $text ]]; then
     flock 9
@@ -685,6 +784,7 @@ cmd_turn() {
   ev turn
   [[ -z $SID || $agent != claude ]] && ev "ctx 0"
   speech_warm
+  LAST_MUTTER=$EPOCHSECONDS
   REACTION=$(reaction thinking)
   set_state thinking "$text" thinking
   live_decide "$text" "" ""
@@ -704,6 +804,8 @@ cmd_turn() {
     mode) log "permission mode $rest" ;;
     tool)
       IFS=$'\t' read -r tcat id activity status <<<"$rest"
+      [[ -n $note ]] && trace note "$note"
+      note=""
       REACTION=$(cat "$RT/live.json" 2>/dev/null || reaction "tool.$tcat")
       set_state tool "$activity" "$status"
       ev "tool $id $tcat"
@@ -727,6 +829,11 @@ cmd_turn() {
         last_decide=$EPOCHSECONDS
       fi
       ;;
+    think) mutter "$rest" || trace think "$rest" ;;
+    note)
+      [[ -n $note ]] && trace note "$note"
+      note=$rest
+      ;;
     denied) denied=$rest ;;
     mood) mood=$rest ;;
     say) say=$rest replied=true ;;
@@ -738,6 +845,7 @@ cmd_turn() {
 
   ev rest
   rm -f "$RT/turn.pid"
+  stop_mutter
   touch "$RT/sid" 2>/dev/null
   if [[ -e $RT/cancel.$$ ]]; then
     stop_live
@@ -900,6 +1008,7 @@ cmd_approve() {
   esac
   log "approve? $short"
   before=$(cat "$(state_file)" 2>/dev/null)
+  stop_mutter
   REACTION=$(reaction needs_you)
   set_state needs_you "$short"
   cue
@@ -1126,6 +1235,7 @@ cmd_portal() {
     --glitch "$GLITCH_HOME/bin/glitch" --web "$GLITCH_HOME/web" --plugin "$GLITCH_HOME/plugin" --max-seconds "$RECORD_LIMIT"
 }
 
+card_sweep
 case "${1:-}" in
 toggle) shift; cmd_toggle "$@" ;;
 stop) exec 8>"$RT/key.lock"; flock 8; cmd_stop ;;
@@ -1137,6 +1247,7 @@ unpair) cmd_unpair ;;
 portal) cmd_portal ;;
 cert) cmd_cert "${2:-}" ;;
 _live) cmd_live ;;
+_mutter) cmd_mutter ;;
 _expire) cmd_expire ;;
 _approve) cmd_approve ;;
 _reap) cmd_reap ;;

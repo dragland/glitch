@@ -5,10 +5,14 @@ then wait on a FIFO for the line to say, synthesize it (~0.1-0.2 s) and exit.
     speak VOICE.onnx FIFO OUT.wav
 
 OUT.wav appears atomically, after OUT.env beside it: the line's loudness
-envelope ("<hz> <0..99> ..."), which the orb moves to while the wav plays.
+envelope ("<hz> <0..99> ..."), which the orb moves to while the wav plays. A Chinese
+voice also leaves OUT.ruby, the text it read as [text, pinyin] pairs. A pair is one
+character with the reading it was spoken with, or a run of other text with "". Piper
+writes numbers out before reading them, so OUT.ruby has 十五 where the line had 15.
 Empty input (or the FIFO closing unwritten) exits without output.
 """
 
+import json
 import math
 import os
 import sys
@@ -27,12 +31,49 @@ def envelope(path):
     top = sorted(rms)[int(len(rms) * 0.97)] if rms else 0
     return [min(99, int(99 * v / top)) if top else 0 for v in rms]
 
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")  # transformers warns "PyTorch was not found" on every import
+os.environ.setdefault("HF_HUB_OFFLINE", "1")  # transformers asks huggingface.co about a tokenizer even when it is a local folder
+
 from piper import PiperVoice
+
+
+def chinese(voice, home):
+    """_chinese_phonemizer and its g2p are Piper 1.8 internals, built on the first
+    phonemize. Piper downloads g2pW, unpinned, when download_dir has none."""
+    if not os.path.exists(os.path.join(home, "g2pW", "SHA")):
+        sys.exit(f"speak: no g2pW in {home}: run install.sh")
+    voice.phonemize("")
+    phonemizer, read = voice._chinese_phonemizer, []
+    g2p = phonemizer.g2p
+
+    def reading(sentence):
+        out = g2p(sentence)
+        read.append((sentence, out[0]))
+        return out
+
+    phonemizer.g2p = reading
+    return read
+
+
+def ruby(read):
+    from pypinyin.contrib.tone_convert import to_tone
+    out = []
+    for sentence, syllables in read:
+        for ch, syl in zip(sentence, syllables):
+            if syl:
+                out.append([ch, to_tone(syl.replace("u:", "v"))])
+            elif out and not out[-1][1]:
+                out[-1][0] += ch
+            else:
+                out.append([ch, ""])
+    return out
 
 
 def main():
     model, fifo, out = sys.argv[1:4]
-    voice = PiperVoice.load(model)
+    home = os.path.dirname(os.path.abspath(model))
+    voice = PiperVoice.load(model, download_dir=home)
+    read = chinese(voice, home) if voice.config.phoneme_type.value == "pinyin" else None
     with open(fifo, encoding="utf-8", errors="replace") as f:
         text = f.read().strip()
     if not text:
@@ -40,7 +81,12 @@ def main():
     tmp = out + ".tmp"
     with wave.open(tmp, "wb") as w:
         voice.synthesize_wav(text, w)
-    env = os.path.splitext(out)[0] + ".env"
+    stem = os.path.splitext(out)[0]
+    if read is not None:
+        with open(stem + ".ruby.tmp", "w", encoding="utf-8") as f:
+            json.dump(ruby(read), f, ensure_ascii=False)
+        os.replace(stem + ".ruby.tmp", stem + ".ruby")
+    env = stem + ".env"
     try:
         with open(env + ".tmp", "w") as f:
             f.write(" ".join(map(str, [ENV_HZ] + envelope(tmp))))

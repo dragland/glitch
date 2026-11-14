@@ -3,6 +3,7 @@ import { SAY_LAG } from "../plugin/orb.mjs"
 
 const $ = id => document.getElementById(id)
 const canvas = $("orb"), textEl = $("text"), saidEl = $("said"), lineEl = $("line"), hintEl = $("hint"), moreEl = $("more")
+const traceEl = $("trace")
 const spokenEl = $("spoken"), askEl = $("ask"), qtEl = $("qt"), nEl = $("n"), labelEl = $("label"), drainEl = $("drain")
 const restEl = $("rest"), longEl = $("long"), allowEl = $("allow"), denyEl = $("deny"), stopEl = $("stop")
 const installEl = $("install"), awayEl = $("away"), offerEl = $("offer"), yesEl = $("yes"), noEl = $("no")
@@ -10,6 +11,7 @@ const TAP_MS = 250, HANDOFF_MS = 30000, RELOAD_MS = 30000, ARM_MS = 400, UNHEARD
 const WORK = new Set(["thinking", "tool"])
 const ORB_Y_OF_HEIGHT = 0.33, ORB_RADIUS_STAGE_PX = 135, TALK_RADII = 1.5, DISCARD_RADII = 2
 const HEARD_S_PER_WORD = 0.025, SPOKEN_LEAD_S = 0.05, VOICED_LEVEL = 8, VOICE_GAP_S = 0.12, PAUSE_SNAP_S = 0.6
+const TRACE_SHOWN = 1
 const BUZZ = { start: 12, sent: [12, 70, 12], ask: [40, 80, 40, 80, 40], failed: [180] }
 
 let installer = null, booted = false, persisted = false
@@ -17,6 +19,7 @@ let reactions = {}, offline = false, shell = null, stale = false
 let server = null, local = null, turn = null, approvals = []
 let heard = "", reply = null, note = "", awaiting = 0, offering = false
 let cleared = false, typeHeard = false, since = 0, armed = 0, lapsed = false
+let trace = [], traceFor = null
 let orb
 
 // Chrome fires beforeinstallprompt once per page load, possibly during the first await below.
@@ -178,6 +181,7 @@ function render() {
   said(r || offline || local === "listening" || cleared || turn === "desk" ? "" : heard)
   if (r) line(r)
   else statusLine(status())
+  traced(r || a || offline || local === "listening" || cleared || turn === "desk" ? [] : trace)
   hintEl.hidden = !r || unlocked || !queue.length
   more(r?.shown === "full" ? r.extra ??= extra(r) : "", r)
   edges(textEl)
@@ -206,6 +210,50 @@ function line(r) {
   spokenEl.textContent = text
   if (r.shown === "typing") r.typer = type(lineEl, text, r.times, heardNow, () => { r.shown = "full"; render() })
   else lineEl.textContent = text
+}
+
+function traced(list) {
+  const rows = list.filter(t => t.kind !== "zh" || t.heard).slice(-TRACE_SHOWN).reverse()
+  const key = rows.map(t => t.n + (t.heard || "")).join()
+  traceEl.hidden = !rows.length
+  if (key === traceFor) return
+  traceFor = key
+  const row = (text, cls) => {
+    const e = make("p", text, cls), k = `${cls} ${text}`
+    if (tracedRows.has(k)) e.style.animation = "none"
+    tracedRows.add(k)
+    return e
+  }
+  if (!rows.length) tracedRows.clear()
+  traceEl.replaceChildren(...rows.flatMap(t => t.kind !== "zh" ? [row(t.text, t.kind)]
+    : [hanzi(t, row(t.ruby?.length ? "" : t.zh, "zh")), ...t.heard === "done" ? [row(t.text, "en")] : []]))
+}
+const tracedRows = new Set()
+
+function hanzi(t, p) {
+  p.lang = "zh-Hans"
+  for (const [text, py] of t.ruby || []) {
+    if (!py) { p.append(text); continue }
+    const r = make("ruby", text)
+    r.append(Object.assign(make("rt", py), { lang: "zh-Latn-pinyin" }))
+    p.append(r)
+  }
+  return p
+}
+
+let traceN = 0
+const traceIn = (t, restored) => ({ ...t, n: ++traceN, heard: restored && t.kind === "zh" ? "done" : "" })
+const muttered = (id, how) => { const t = trace.find(t => t.clip === id); if (t && t.heard !== "done") t.heard = how }
+
+function dropMutters() {
+  for (const c of queue) if (c.kind === "mutter") muttered(c.id, "done")
+  queue = queue.filter(c => c.kind !== "mutter")
+  if (playing?.c.kind !== "mutter") return
+  muttered(playing.c.id, "done")
+  stop(playing)
+  playing = null
+  orb.event("hush")
+  pump()
 }
 
 function statusLine(s) {
@@ -410,9 +458,12 @@ function clip(c) {
   if (seen.has(c.id)) return
   seen.add(c.id)
   if (local === "listening") {
-    if (c.kind !== "cue") api("/api/played", { id: c.id })
+    if (c.kind === "mutter") muttered(c.id, "done")
+    else if (c.kind !== "cue") api("/api/played", { id: c.id })
     return
   }
+  if (c.kind === "mutter" && (!unlocked || document.hidden || approvals.length)) return void muttered(c.id, "done")
+  if (c.kind !== "cue" && c.kind !== "mutter") dropMutters()
   if (c.kind === "cue") {
     if (unlocked) started.set(c.id, load(c).then(b => { sound(b); return ac.currentTime }, () => null))
     return
@@ -431,7 +482,8 @@ async function pump() {
     if (playing === p) {
       playing = null
       if (c.kind === "say" && reply && !reply.shown) full(reply)
-      api("/api/played", { id: c.id })
+      if (c.kind === "mutter") muttered(c.id, "done")
+      else api("/api/played", { id: c.id })
       pump()
       render()
     }
@@ -447,12 +499,14 @@ async function pump() {
   p.src = sound(buf, at)
   started.set(c.id, at)
   if (c.kind === "say" && reply && !reply.shown) speak(reply, at, c)
+  if (c.kind === "mutter") setTimeout(() => { if (playing === p) { muttered(c.id, "on"); render() } }, Math.max(0, (at - ac.currentTime + (ac.outputLatency || 0)) * 1000))
   const ms = (at - ac.currentTime + Math.max(0, (ac.outputLatency || 0) - SAY_LAG)) * 1000
   p.timer = setTimeout(() => { if (c.env) orb.event("say " + c.env) }, ms)
   p.src.onended = () => {
     if (playing !== p) return
     playing = null
-    api("/api/played", { id: c.id })
+    if (c.kind === "mutter") muttered(c.id, "done")
+    else api("/api/played", { id: c.id })
     pump()
     render()
   }
@@ -468,7 +522,8 @@ function interrupted() {
   if (reply) full(reply)
   if (!playing) return
   stop(playing)
-  queue.unshift(playing.c)
+  if (playing.c.kind === "mutter") muttered(playing.c.id, "done")
+  else queue.unshift(playing.c)
   playing = null
   orb.event("hush")
 }
@@ -476,6 +531,7 @@ function interrupted() {
 function forget() {
   lapsed = false
   heard = note = ""
+  trace = []
   setReply(null)
   server = null
   hush(false)
@@ -485,6 +541,7 @@ function forget() {
 function hush(ack) {
   if (reply) full(reply)
   if (!playing && !queue.length) return
+  for (const t of trace) if (t.kind === "zh") t.heard = "done"
   if (playing) stop(playing)
   playing = null
   queue = []
@@ -585,8 +642,10 @@ function connect() {
       lapsed = false
       server = h.state || null
       heard = h.heard || ""
+      trace = (h.trace || []).map(t => trace.find(o => o.clip && o.clip === t.clip) || traceIn(t, true))
       setReply(h.reply, replay.some(c => c.kind === "say"))
     }
+    dropMutters()
     if (playing && !replay.some(x => x.id === playing.c.id)) { stop(playing); playing = null; orb.event("hush") }
     queue = queue.filter(c => replay.some(x => x.id === c.id))
     for (const c of replay) clip(c)
@@ -606,12 +665,15 @@ function connect() {
     if (awaiting) { clearTimeout(awaiting); awaiting = 0; local = null }
     if (!local) orb.set({ state: m.state, reaction: m.reaction })
   })
+  on("trace", m => { trace.push(traceIn(m)) })
   on("signal", m => {
     if (m.line === "turn" || m.line === "rest") approvals = []
+    if (m.line === "turn") trace = []
     orb.event(m.line)
   })
   on("heard", m => {
     heard = m.text
+    trace = []
     setReply(null)
     note = ""
     cleared = false
@@ -624,6 +686,7 @@ function connect() {
     else forget()
   })
   on("reply", m => {
+    dropMutters()
     setReply(m, true)
     if (local !== "listening") cleared = false
   })
@@ -631,6 +694,7 @@ function connect() {
   on("approve", m => {
     if (approvals.some(a => a.id === m.id)) return
     approvals.push(received(m))
+    dropMutters()
     buzz(BUZZ.ask)
   })
   on("approved", m => answered(m.id))
@@ -729,6 +793,7 @@ function mic() {
   }).finally(() => { asking = null })
 }
 
+// A held stream keeps a Bluetooth headset's voice link, and its mic, from every other device.
 function dropMic() {
   stream?.getTracks().forEach(t => t.stop())
   source?.disconnect()
@@ -749,7 +814,7 @@ function begin(p) {
 
 function record(p) {
   mic().then(s => {
-    if (press !== p) return
+    if (press !== p) { if (!press) dropMic(); return }
     const type = ["audio/webm;codecs=opus", "audio/ogg;codecs=opus", "audio/mp4"].find(t => MediaRecorder.isTypeSupported(t))
     p.rec = new MediaRecorder(s, type ? { mimeType: type } : undefined)
     p.chunks = []
@@ -776,7 +841,7 @@ canvas.addEventListener("pointerdown", e => {
   unlock()
   note = ""
   const p = press = { id: e.pointerId }, t = performance.now()
-  const talk = () => { p.t = t; hush(true); record(p) }
+  const talk = () => { p.t = t; dropMutters(); hush(true); record(p) }
   if (first && queue.length) { p.timer = setTimeout(() => { talk(); begin(p) }, TAP_MS); return }
   const speaking = !!(playing || queue.length)
   talk()
@@ -803,6 +868,7 @@ function release(e, cancel = false) {
   if (cancel) p.discard = true
   if (p.discard || performance.now() - p.t < TAP_MS || !rec) {
     rec?.stop()
+    dropMic()
     if (p.discard && p.begun && !document.hidden) chime("unsure")
     if (p.begun) { local = null; cleared = false; if (!p.discard && turn !== "desk") note ||= "hold to talk"; show() }
     return
@@ -813,6 +879,7 @@ function release(e, cancel = false) {
   show()
   rec.onstop = () => send(new Blob(p.chunks, { type: rec.mimeType }))
   rec.stop()
+  dropMic()
 }
 canvas.addEventListener("pointerup", e => release(e))
 canvas.addEventListener("pointercancel", e => release(e, true))

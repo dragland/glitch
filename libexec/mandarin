@@ -1,0 +1,75 @@
+#!/usr/bin/env python3
+"""Turn one of the agent's working thoughts into a short Mandarin line for the mutter.
+
+    echo "I'm checking how the timer is set up. Then ..." | mandarin
+
+Has glitch-mind (the local Qwen3) say the thought's first sentence in simple Mandarin
+and prints {"en", "rest", "zh"}: the sentence, what followed it in the thought, and
+the line. The line holds only Chinese characters, digits and Chinese punctuation,
+because Piper's Chinese voices speak Latin letters as stray syllables. Prints nothing
+when the sentence is under MIN_EN characters, the model is away or slow, or its
+answer is not such a line. Errors go to stderr.
+"""
+
+import json
+import os
+import re
+import sys
+import urllib.request
+
+URL = "http://127.0.0.1:8765/v1/chat/completions"
+KEY = os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "glitch", "mind.key")
+SYSTEM = ("You translate an AI assistant's working thoughts into Mandarin for a beginner learner. "
+          "Reply with one short, natural spoken sentence in Simplified Chinese, 20 characters at most, "
+          "using common everyday words. Leave out file names, paths, code and numbers; say the idea "
+          "simply instead. Output only the Chinese sentence.")
+MIN_EN, MAX_EN, MAX_ZH = 12, 240, 40
+HAN = re.compile(r"[一-鿿]")
+FILE = re.compile(r"`?[\w~.-]*(/[\w.-]+)+/?`?|`?\b[\w-]+\.[a-z]{1,5}\b`?")
+CODE = re.compile(r"`[^`]+`|\b\w+_\w+\b(\(\))?|\b\w+\(\)|\b[a-z]+[A-Z]\w*\b")
+LINE = re.compile(r"[一-鿿0-9.%，。！？、；：…—\s]+")
+TITLE = re.compile(r"^\s*\*\*[^*\n]*\*\*\s*")
+END = re.compile(r"[.!?]+[\"')\]]*(?=\s+[A-Z\"'(\[]|\s*$)")
+
+
+def split(thought):
+    """Claude's summarised thoughts can open with a bold title."""
+    text = " ".join(TITLE.sub("", thought).split())
+    m = END.search(text)
+    en = text[:m.end()] if m else text
+    return en[:MAX_EN], text[len(en):].strip()
+
+
+def translate(en):
+    """Qwen3 copies an identifier into the line whatever the prompt says."""
+    en = CODE.sub("the code", FILE.sub("the file", en))
+    # Qwen3 spends the whole answer thinking unless its template is told not to.
+    body = {"messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": en}],
+            "chat_template_kwargs": {"enable_thinking": False}, "temperature": 0.2, "max_tokens": 60}
+    with open(KEY) as f:
+        key = f.read().strip()
+    req = urllib.request.Request(URL, json.dumps(body).encode(),
+                                 {"Content-Type": "application/json", "Authorization": f"Bearer {key}"})
+    with urllib.request.urlopen(req, timeout=6) as r:
+        out = json.load(r)["choices"][0]["message"]["content"].strip().splitlines()
+    return out[0].strip(" \"'“”「」") if out else ""
+
+
+def main():
+    en, rest = split(sys.stdin.read())
+    if len(en) < MIN_EN:
+        return 0
+    zh = translate(en)
+    if len(zh) > MAX_ZH or len(HAN.findall(zh)) < 2 or not LINE.fullmatch(zh):
+        print(f"mandarin: unusable answer {zh!r}", file=sys.stderr)
+        return 0
+    print(json.dumps({"en": en, "rest": rest, "zh": zh}, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except (OSError, ValueError, KeyError, IndexError) as e:
+        print(f"mandarin: {e}", file=sys.stderr)
+        sys.exit(0)

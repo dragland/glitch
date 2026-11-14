@@ -3,7 +3,7 @@
 # Remove glitch's links, keybinding hook, services and orb plugin.
 #
 #   ./uninstall.sh           keep downloads (~/.local/share/glitch) and settings
-#   ./uninstall.sh --purge   also delete downloads and ~/.config/glitch
+#   ./uninstall.sh --purge   also delete downloads, ~/.config/glitch and ~/.local/state/glitch
 
 set -uo pipefail
 
@@ -49,8 +49,8 @@ done
 systemctl --user daemon-reload
 
 if [[ ${1:-} == --purge ]]; then
-  rm -rf "$DATA" "$CONFIG/glitch"
-  echo "    deleted ~/.local/share/glitch and ~/.config/glitch"
+  rm -rf "$DATA" "$CONFIG/glitch" "${XDG_STATE_HOME:-$HOME/.local/state}/glitch"
+  echo "    deleted ~/.local/share/glitch, ~/.config/glitch and ~/.local/state/glitch"
 fi
 echo "==> Done (voxtype settings, the ydotool package and its /etc/udev and /etc/modules-load.d files were left as they are)"
 # Last, since stopping it also ends a remote control session running this script.
