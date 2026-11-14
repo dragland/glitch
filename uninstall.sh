@@ -53,6 +53,6 @@ if [[ ${1:-} == --purge ]]; then
   rm -rf "$DATA" "$CONFIG/glitch" "${XDG_STATE_HOME:-$HOME/.local/state}/glitch"
   echo "    deleted ~/.local/share/glitch, ~/.config/glitch and ~/.local/state/glitch"
 fi
-echo "==> Done (voxtype settings, the ydotool package and its /etc/udev and /etc/modules-load.d files were left as they are)"
+echo "==> Done (voxtype settings and desktop control's root part were left as they are; the README's Install section has the command that removes that part)"
 # Last, since stopping it also ends a remote control session running this script.
 systemctl --user stop glitch-remote-reap.timer glitch-remote.service >/dev/null 2>&1

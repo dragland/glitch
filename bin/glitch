@@ -336,6 +336,8 @@ markup_escape() {
 
 notify() {
   local id
+  # The summary is the agent's text, and a leading dash would be read as an option.
+  [[ $1 == -* ]] && set -- "glitch: $1" "${@:2}"
   id=$(omarchy-notification-send --app-name glitch -g "󰍬" -u critical -p \
     -r "$(cat "$RT/notify.id" 2>/dev/null || echo 0)" "$@" 2>>"$RT/glitch.log") || {
     log "notify failed: $1"
@@ -365,7 +367,7 @@ card_sweep() {
 expire_later() {
   local mt
   mt=$(stat -c %Y "$RT/sid" 2>/dev/null) || return 0
-  setsid bash -c "sleep $((RESUME_WINDOW + 2)); [[ \$(stat -c %Y '$RT/sid' 2>/dev/null) == $mt ]] && exec '$0' _expire" \
+  setsid bash -c 'sleep "$1"; [[ $(stat -c %Y "$2" 2>/dev/null) == "$3" ]] && exec "$4" _expire' _ $((RESUME_WINDOW + 2)) "$RT/sid" "$mt" "$0" \
     </dev/null >/dev/null 2>&1 8>&- 9>&- &
 }
 
@@ -511,7 +513,7 @@ adapter_claude() {
   # one to `glitch _approve`.
   local hook wait=75
   [[ $PORTAL == phone ]] && wait=$((PORTAL_APPROVE_TIMEOUT + 15))
-  hook=$(jq -cn --arg cmd "$GLITCH_HOME/bin/glitch _approve" --argjson wait "$wait" \
+  hook=$(jq -cn --arg cmd "$(printf '%q _approve' "$GLITCH_HOME/bin/glitch")" --argjson wait "$wait" \
     '{hooks: {PermissionRequest: [{matcher: "*", hooks: [{type: "command", command: $cmd, timeout: $wait}]}]}}')
   args=(-p --output-format stream-json --verbose --include-partial-messages
     --permission-mode auto --permission-prompts none --settings "$hook" --chrome
@@ -695,7 +697,7 @@ cmd_start() {
   set_state listening
   chime start
   # voxtype cuts a recording at its cap, so send just before it.
-  setsid bash -c "sleep $((RECORD_LIMIT - 10)); [[ \$(cat '$RT/recording' 2>/dev/null) == $stamp ]] && exec '$0' stop" \
+  setsid bash -c 'sleep "$1"; [[ $(cat "$2" 2>/dev/null) == "$3" ]] && exec "$4" stop' _ $((RECORD_LIMIT - 10)) "$RT/recording" "$stamp" "$0" \
     </dev/null >/dev/null 2>&1 8>&- 9>&- &
 }
 
@@ -1037,6 +1039,10 @@ cmd_approve() {
   (speech_warm "ask.$APPROVE_ID" && speech_render "Need you: ${ask,}" && play "$SPEAK_SLOT.wav"; rm -f "$SPEAK_SLOT".*) </dev/null >/dev/null 2>&1 &
   if [[ $PORTAL == phone ]]; then
     pick=$(phone_approve "$shown" "$ask" "${cut:-1}")
+  elif [[ -z $tool || -z $short ]]; then
+    # Nothing to show, so nothing to allow.
+    pick=Unsent
+    hush
   else
     pick=$(timeout 60 omarchy-menu-select "glitch wants to · $short" "󰄬	Allow once" "󰅖	Deny" -- --width 760 2>/dev/null) || pick=""
     [[ -z $pick ]] && omarchy-menu close >/dev/null 2>&1
@@ -1053,7 +1059,7 @@ cmd_approve() {
     case $pick in
     Deny) why="The user chose Deny." ;;
     Refused) why="The user tried to allow it, but it was refused." ;;
-    Unsent) why="It couldn't be shown on the user's phone, so it was denied." ;;
+    Unsent) why="It couldn't be shown to the user, so it was denied." ;;
     esac
     [[ $PORTAL == phone && $pick != Unsent && $cut != 0 ]] &&
       next="It was too long to review on the phone, so it can't be allowed there: don't retry it as is; shorten it or split it into smaller steps."
@@ -1181,7 +1187,7 @@ cmd_unpair() {
 cmd_cert() {
   local ca="$DATA/portal/glitch-ca.crt" from to=99991231235959Z fp d
   if [[ ! $PORTAL_ADDR =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
-    echo "glitch cert: set PORTAL_ADDR (this machine's LAN address, e.g. 192.168.1.12) in $USER_CONF/glitch.conf" >&2
+    echo "glitch cert: set PORTAL_ADDR (this machine's LAN address, e.g. 192.168.1.20) in $USER_CONF/glitch.conf" >&2
     return 1
   fi
   if [[ $1 != --renew && (-e $PORTAL_CERT || -e $ca) ]]; then
