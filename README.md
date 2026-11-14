@@ -28,9 +28,9 @@ It can also mutter while it works (off by default). With `MUTTER=1` in
 `~/.config/glitch/glitch.conf` and a re-run of `./install.sh`, every so often it
 speaks one of the agent's thoughts in Mandarin, in a second voice. glitch speaks
 English only for its answer and a permission question, so a Mandarin voice
-mid-turn can't be mistaken for either. Mandarin is the only language it has: the voice and the
-phone's pinyin are built for it. glitch-mind translates, so the mutter needs
-an install without `--no-mind`.
+mid-turn can't be mistaken for either. Mandarin is its only language, since the
+voice and the phone's pinyin are built for it. glitch-mind translates, so the
+mutter needs an install without `--no-mind`.
 
 ## Install
 
@@ -40,7 +40,7 @@ omarchy plugin add https://github.com/dragland/glitch.git
 ```
 
 `add` only clones the plugin; install.sh does the rest. A clone anywhere else
-works too: run its `install.sh`.
+works too, through its own `install.sh`.
 
 Needs Omarchy 4 with voxtype dictation (`omarchy install dictation voxtype`)
 and Claude Code or Codex. What install.sh does to the machine:
@@ -65,9 +65,9 @@ Remote control and the phone portal stay off until you turn them on (below).
 Update with `omarchy plugin update dragland.glitch` (`git pull` in a clone
 elsewhere), then run `install.sh` again. To remove it, run `uninstall.sh` first
 (`--purge` also deletes downloads and settings) and only then, if you added it
-as a plugin, `omarchy plugin remove dragland.glitch`: that command deletes the
-folder uninstall.sh lives in. (Removed in the wrong order, glitch simply stops;
-clone it again and run its `uninstall.sh` to clean up.) Uninstalling leaves the root part of desktop
+as a plugin, `omarchy plugin remove dragland.glitch`, which deletes the folder
+uninstall.sh lives in. If you removed it first, clone it again and run its
+`uninstall.sh`. Uninstalling leaves the root part of desktop
 control: `sudo pacman -R ydotool && sudo rm
 /etc/udev/rules.d/70-uinput.rules /etc/modules-load.d/uinput.conf` removes it.
 
@@ -102,11 +102,11 @@ With `REMOTE=1` in `~/.config/glitch/glitch.conf` and a re-run
 of `./install.sh`, `glitch-remote` (Claude Code's remote control) lists this
 machine in the Claude app and at claude.ai/code while you're logged in.
 Sessions you or your claude.ai projects start there run in `WORKDIR` (`~/Work`)
-with Claude in Chrome, in the permission mode `REMOTE_PERMISSION_MODE` names:
-`auto` by default, where Claude judges each action itself, with nobody at the
-desk to ask. `bypassPermissions` skips every check, so set it only if anyone
-who can reach your claude.ai account may do anything on this machine. Restart
-`glitch-remote` after changing the mode. glitch's own voice turns (`claude -p`)
+with Claude in Chrome, in the permission mode `REMOTE_PERMISSION_MODE` names.
+The default, `auto`, has Claude judge each action itself. `bypassPermissions`
+skips every check, so set it only if anyone who can reach your claude.ai
+account may do anything on this machine. Restart `glitch-remote` after changing
+the mode. glitch's own voice turns (`claude -p`)
 don't appear there.
 
 - The first install asks you to run `claude remote-control` once in `WORKDIR`
@@ -125,8 +125,8 @@ the phone answers only on the phone. It runs while you're logged in at the desk.
 So far tried only on Android with Chrome.
 
 1. Run `glitch phone`. It picks this machine's LAN address (reserve it in your router, a DHCP reservation, since the certificate and the paired app are tied to it), makes a certificate, starts the portal, and prints the firewall and Tailscale commands left for you to run, then a QR code.
-2. Scan the code on the phone, on the same Wi-Fi, and proceed past Chrome's warning (Advanced, then Proceed): the phone doesn't trust the certificate yet. The page hands it over and walks through installing it in Settings.
-3. Before pairing, open the installed certificate on the phone (Trusted credentials > User) and compare its SHA-256 fingerprint with the one `glitch phone` printed. That download was not protected, so this check is what tells you the certificate is yours; remove it if they differ. The real one vouches only for that one address, and `glitch cert` destroys the key that signed it.
+2. Scan the code on the phone, on the same Wi-Fi, and proceed past Chrome's warning (Advanced, then Proceed), since the phone doesn't trust the certificate yet. The page hands it over and walks through installing it in Settings.
+3. Before pairing, open the installed certificate on the phone (Trusted credentials > User) and compare its SHA-256 fingerprint with the one `glitch phone` printed. Nothing protected that download, so remove the certificate if they differ. The real one vouches only for that one address, and `glitch cert` destroys the key that signed it.
 4. Open glitch from that page, say "pair my phone" at the desk (or run `glitch pair`), and type the code it speaks.
 5. Install it to the home screen.
 

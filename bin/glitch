@@ -38,12 +38,10 @@ CARD="$RT/card"
 [[ -f $USER_CONF/glitch.conf ]] && . "$USER_CONF/glitch.conf"
 export GLITCH_BEEP_VOLUME="${BEEP_VOLUME:-2.0}" MIND JEV_MODEL OPENAI_DECIDE_MODEL GLITCH_MIND_PORT="$MIND_PORT"
 
-# glitch-mind starts ahead of the shell, which card_sweep below needs.
 case "${1:-}" in
 _mind)
-  # Two slots so the final reaction never queues behind a live one; prompts are ~400
-  # tokens, so 1024 per slot is plenty. The key (made by install.sh) keeps web pages
-  # from driving the model through localhost. A CPU build ignores -ngl.
+  # llama-server splits -c across the -np slots: 1024 each, for ~400-token prompts. Any web
+  # page can reach localhost, so the model needs the key. A CPU build ignores -ngl.
   exec "$DATA/llama/llama-server" -m "$DATA/models/Qwen3-1.7B-Q4_K_M.gguf" -ngl 99 --host 127.0.0.1 --port "$MIND_PORT" \
     -c 2048 -np 2 --no-slots --no-webui --api-key-file "$DATA/mind.key"
   ;;
@@ -51,7 +49,7 @@ _remote)
   # 78 is EX_CONFIG, which glitch-remote.service doesn't restart on.
   [[ $REMOTE == 1 ]] || { echo "glitch remote: off (REMOTE=1 in $USER_CONF/glitch.conf turns it on)" >&2; exit 78; }
   cd "$WORKDIR" || exit 78
-  # An unknown mode stops claude at startup, and the unit would restart it every 30 s.
+  # claude exits on an unknown mode, and the unit would restart it every 30 s.
   [[ $REMOTE_PERMISSION_MODE =~ ^(default|acceptEdits|auto|plan|dontAsk|bypassPermissions)$ ]] ||
     { echo "glitch remote: REMOTE_PERMISSION_MODE=$REMOTE_PERMISSION_MODE isn't a permission mode" >&2; exit 78; }
   # claude is mise's wrapper (omarchy-agent-account-exec), which sets the Claude home
@@ -340,7 +338,7 @@ markup_escape() {
 
 notify() {
   local id
-  # The summary and body are the agent's text, and omarchy-notification-send reads a leading dash as an option.
+  # omarchy-notification-send reads a leading dash as an option, and both texts are the agent's.
   [[ $1 == -* ]] && set -- "glitch: $1" "${@:2}"
   [[ ${2:-} == -* ]] && set -- "$1" " $2" "${@:3}"
   id=$(omarchy-notification-send --app-name glitch -g "󰍬" -u critical -p \
@@ -1255,7 +1253,6 @@ cmd_cert() {
 
 portal_ca_fingerprint() { openssl x509 -inform DER -in "$DATA/portal/glitch-ca.crt" -noout -fingerprint -sha256 | cut -d= -f2; }
 
-# Prints the root commands still needed for the phone to reach PORTAL_ADDR:PORTAL_PORT.
 portal_reach() {
   local lan a b c d n rules prefs routes ts todo=()
   lan=$(ip -j -4 addr show 2>/dev/null | jq -r --arg a "$PORTAL_ADDR" \
@@ -1314,8 +1311,7 @@ cmd_phone() {
     route=$(ip -j -4 route get 1.1.1.1 2>/dev/null)
     PORTAL_ADDR=$(jq -r '.[0].prefsrc // empty' <<<"$route")
     dev=$(jq -r '.[0].dev // empty' <<<"$route")
-    # A VPN's or a public address would put the portal, and its certificate, on the wrong network.
-    # /sys type 1 is Ethernet or Wi-Fi; tunnels are not.
+    # /sys type 1 is Ethernet or Wi-Fi; a tunnel has another.
     if [[ ! $PORTAL_ADDR =~ ^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)[0-9.]+$ || $dev == tap* ||
       $(cat "/sys/class/net/$dev/type" 2>/dev/null) != 1 ]]; then
       echo "glitch phone: couldn't tell this machine's home network address (found ${PORTAL_ADDR:-none} on ${dev:-no interface})." >&2
@@ -1336,7 +1332,7 @@ cmd_phone() {
     cmd_cert "" >/dev/null || return 1
     echo "2. Certificate: made"
   fi
-  # systemctl disable (glitch phone --off) removes a linked unit's file too.
+  # systemctl disable removes a linked unit's file.
   unit="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/glitch-portal.service"
   mkdir -p "${unit%/*}" && ln -sfn "$GLITCH_HOME/systemd/glitch-portal.service" "$unit"
   systemctl --user daemon-reload

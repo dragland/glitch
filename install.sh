@@ -143,8 +143,8 @@ fetch "$VOICE_URL.onnx.json" "$DATA/voices/$VOICE.onnx.json" "$VOICE_JSON_SHA"
 if ((with_mind)); then
   step "Mind (llama.cpp $LLAMA_BUILD + $MODEL)"
   mkdir -p "$DATA/models"
-  # A Vulkan driver (an ICD) and the loader; a software rasteriser (lavapipe) alone is slower than the CPU build.
-  # No grep -q on ldconfig: it would close the pipe early, and pipefail turns that into a failure.
+  # Lavapipe (lvp) is Vulkan on the CPU, slower than the CPU build. grep -q would close
+  # ldconfig's pipe early, which pipefail counts as a failure.
   variant=$arch
   icds=$(grep -hs library_path /usr/share/vulkan/icd.d/*.json /etc/vulkan/icd.d/*.json | grep -v lvp || true)
   if [[ -n $icds && -n $(ldconfig -p 2>/dev/null | grep 'libvulkan\.so\.1' || true) ]]; then
@@ -193,9 +193,8 @@ if ((with_mind)); then
 fi
 
 step "Linking code into place"
-# `omarchy plugin add` clones the repo to this path. Any other checkout links only plugin/ there:
-# omarchy plugin update treats a linked repo root as its own clone, fails to validate the link,
-# and hard-resets the checkout.
+# `omarchy plugin add` clones the repo to this path. Any other checkout links plugin/ there,
+# never the repo root: `omarchy plugin update` would hard-reset it (AGENTS.md).
 plugin_dir="$CONFIG/omarchy/plugins/$PLUGIN_ID"
 if [[ -L $plugin_dir || ! $REPO -ef $plugin_dir ]]; then
   [[ -e $plugin_dir && ! -L $plugin_dir ]] && die "${plugin_dir/#$HOME/~} is another copy of glitch; run its install.sh, or remove it with: omarchy plugin remove $PLUGIN_ID"
@@ -237,8 +236,8 @@ if [[ -n $taken ]]; then
   sed 's/^/      /' <<<"$taken"
   echo "    change one of them (glitch's are in $REPO/hypr/glitch.lua)"
 fi
-# Guarded, so Hyprland's config still loads if the checkout goes before uninstall.sh has run
-# (omarchy plugin remove deletes a plugin's clone).
+# `omarchy plugin remove` deletes a clone, uninstall.sh included, and a plain require of a
+# missing file is a Hyprland config error.
 hook="if io.open(\"$CONFIG/hypr/glitch.lua\") then require(\"hypr.glitch\") end"
 if ! grep -qxF "$hook" "$hypr"; then
   cp "$hypr" "$hypr.bak.$(date +%s)"
@@ -268,7 +267,6 @@ step "Remote control (sessions from the Claude app)"
 workdir=$(conf WORKDIR)
 if [[ $(conf REMOTE) != 1 ]]; then
   systemctl --user disable --now glitch-remote-reap.timer >/dev/null 2>&1 || true
-  # Not --now: stopping it would cut off its sessions mid-turn.
   systemctl --user disable glitch-remote.service >/dev/null 2>&1 || true
   systemctl --user is-active --quiet glitch-remote.service &&
     echo "    note: glitch-remote is still running until you log out; stop it now with: systemctl --user stop glitch-remote"

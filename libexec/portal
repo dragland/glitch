@@ -107,10 +107,8 @@ Content-Security-Policy default-src 'self'; frame-ancestors 'none', plus hashes 
 HTML page's inline <style> and <script> blocks.
   public  GET /pair (the pairing page), /manifest.webmanifest, /icon-*.png
           GET /setup (how to install the CA file and check it), /glitch-ca.crt
-          (DATA/portal/glitch-ca.crt, as a download); both no-store, 404 with no CA file. A
-          phone that doesn't trust the certificate yet reads both past the browser's warning,
-          so neither is authenticated: the user compares the installed certificate's SHA-256,
-          as Android shows it, with the one `glitch phone` prints at the desk.
+          (DATA/portal/glitch-ca.crt, as a download); both no-store, 404 with no CA file.
+          The phone reads both past a certificate warning, so neither is authenticated.
           POST /api/pair {code} -> {ok} with the cookie, or 403
   GET  /, web/* files   the page; HTML sets the cookie again (glitch_device, HttpOnly,
                         Secure, SameSite=Lax: a home-screen launch sends no Strict cookie)
