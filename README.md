@@ -26,9 +26,9 @@ orb also moves with what is happening:
 
 It can also mutter while it works (off by default). With `MUTTER=1` in
 `~/.config/glitch/glitch.conf` and a re-run of `./install.sh`, every so often it
-speaks one of the agent's thoughts in Mandarin, in a second voice. Apart from a
-permission question, English is only the answer, so a voice mid-turn can't be
-mistaken for one. Mandarin is the only language it has: the voice and the
+speaks one of the agent's thoughts in Mandarin, in a second voice. glitch speaks
+English only for its answer and a permission question, so a Mandarin voice
+mid-turn can't be mistaken for either. Mandarin is the only language it has: the voice and the
 phone's pinyin are built for it. glitch-mind translates, so the mutter needs
 an install without `--no-mind`.
 
@@ -39,30 +39,35 @@ omarchy plugin add https://github.com/dragland/glitch.git
 ~/.config/omarchy/plugins/dragland.glitch/install.sh
 ```
 
-The first line adds the orb to the Omarchy shell; the second installs the rest
-and turns it on. A clone anywhere else works the same way: run its `install.sh`.
+`add` only clones the plugin; install.sh does the rest. A clone anywhere else
+works too: run its `install.sh`.
 
 Needs Omarchy 4 with voxtype dictation (`omarchy install dictation voxtype`)
 and Claude Code or Codex. What install.sh does to the machine:
 
 - Downloads ~1.5 GB (pinned and checksummed in install.sh) to
-  `~/.local/share/glitch`: Piper voices and a small local model that picks the
-  orb's reactions. It runs on the GPU through Vulkan where there is a driver and
-  on the CPU otherwise; `--no-mind` skips it.
+  `~/.local/share/glitch`: a Python environment, a Piper voice, and llama.cpp
+  with a small local model that picks the orb's reactions (1.1 GB; `--no-mind`
+  skips it). The model runs on the GPU through Vulkan where there is a driver
+  and on the CPU otherwise. The mutter adds ~0.2 GB.
 - Binds the keys below with one `require` line in `~/.config/hypr/hyprland.lua`.
 - Asks for root once, for desktop control: it installs ydotool and gives your
   login session `/dev/uinput`, and it adds [config/desktop.md](config/desktop.md)
   to `~/.claude/rules`, which every Claude session on the machine reads.
   `--no-desktop` skips all of it.
-- Raises voxtype's recording cap to 10 minutes (`--no-voxtype` skips it; then
-  set `RECORD_LIMIT` to voxtype's own cap).
+- Raises voxtype's recording cap to 10 minutes and gives Whisper a vocabulary
+  hint (`--no-voxtype` skips both; then set `RECORD_LIMIT` to voxtype's own cap).
+- Installs `uv` through mise if it is missing, starts the `glitch-mind` user
+  service, and restarts the Omarchy shell to load the orb.
 
 Remote control and the phone portal stay off until you turn them on (below).
 
-Update with `omarchy plugin update dragland.glitch` (or `git pull`), then
-`./install.sh` again. Remove with `./uninstall.sh` (`--purge` also deletes
-downloads and settings), then `omarchy plugin remove dragland.glitch`. That
-leaves the root part of desktop control: `sudo pacman -R ydotool && sudo rm
+Update with `omarchy plugin update dragland.glitch` (`git pull` in a clone
+elsewhere), then run `install.sh` again. To remove it, run `uninstall.sh` first
+(`--purge` also deletes downloads and settings) and only then, if you added it
+as a plugin, `omarchy plugin remove dragland.glitch`: that command deletes the
+folder uninstall.sh lives in. Uninstalling leaves the root part of desktop
+control: `sudo pacman -R ydotool && sudo rm
 /etc/udev/rules.d/70-uinput.rules /etc/modules-load.d/uinput.conf` removes it.
 
 ## Use
@@ -92,7 +97,7 @@ with grim, hyprctl, ydotool and wtype.
 
 ### From the Claude app
 
-Off by default. With `REMOTE=1` in `~/.config/glitch/glitch.conf` and a re-run
+With `REMOTE=1` in `~/.config/glitch/glitch.conf` and a re-run
 of `./install.sh`, `glitch-remote` (Claude Code's remote control) lists this
 machine in the Claude app and at claude.ai/code while you're logged in.
 Sessions you or your claude.ai projects start there run in `WORKDIR` (`~/Work`)
@@ -100,7 +105,7 @@ with Claude in Chrome, in the permission mode `REMOTE_PERMISSION_MODE` names:
 `auto` by default, where Claude judges each action itself, with nobody at the
 desk to ask. `bypassPermissions` skips every check, so set it only if anyone
 who can reach your claude.ai account may do anything on this machine. Restart
-`glitch-remote` after changing the mode. Glitch's own voice turns (`claude -p`)
+`glitch-remote` after changing the mode. glitch's own voice turns (`claude -p`)
 don't appear there.
 
 - The first install asks you to run `claude remote-control` once in `WORKDIR`
@@ -116,12 +121,15 @@ don't appear there.
 A page with its own orb that the phone opens over HTTPS, at home or through
 Tailscale. It talks to the same conversation as Super+D, and a turn asked from
 the phone answers only on the phone. It runs while you're logged in at the desk.
-Off by default, and so far tried only on Android with Chrome.
+So far tried only on Android with Chrome.
 
-1. Run `glitch phone`. It picks this machine's LAN address (reserve it in your router, a DHCP reservation, since the certificate and the paired app are tied to it), makes a certificate, starts the server, and prints the firewall and Tailscale commands left for you to run, then a QR code.
-2. Scan the code on the phone, on the same Wi-Fi. Chrome warns that the connection isn't private, because the phone doesn't trust the certificate yet: choose Advanced, then Proceed. The page shows the certificate's fingerprint (check it against the one `glitch phone` printed), hands over the certificate, and walks through installing it in Settings. The certificate vouches only for that one address, and `glitch cert` destroys the key that signed it.
-3. Open glitch from that page, say "pair my phone" at the desk (or run `glitch pair`), and type the code it speaks.
-4. Install it to the home screen.
+1. Run `glitch phone`. It picks this machine's LAN address (reserve it in your router, a DHCP reservation, since the certificate and the paired app are tied to it), makes a certificate, starts the portal, and prints the firewall and Tailscale commands left for you to run, then a QR code.
+2. Scan the code on the phone, on the same Wi-Fi, and proceed past Chrome's warning (Advanced, then Proceed): the phone doesn't trust the certificate yet. The page hands it over and walks through installing it in Settings.
+3. Before pairing, open the installed certificate on the phone (Trusted credentials > User) and compare its SHA-256 fingerprint with the one `glitch phone` printed. That download was not protected, so this check is what tells you the certificate is yours; remove it if they differ. The real one vouches only for that one address, and `glitch cert` destroys the key that signed it.
+4. Open glitch from that page, say "pair my phone" at the desk (or run `glitch pair`), and type the code it speaks.
+5. Install it to the home screen.
+
+`glitch phone --off` turns the portal off again.
 
 If the address changes, set the new `PORTAL_ADDR` in `~/.config/glitch/glitch.conf`, run `glitch cert --renew` and `glitch phone`, and install the new certificate on the phone. After a new address or `PORTAL_PORT`, add the app to the home screen again and pair it again. `glitch unpair` forgets every phone.
 

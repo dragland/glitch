@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Remove glitch's links, keybinding hook, services and orb plugin.
+# Remove glitch's links, keybinding hook and services, and disable the orb plugin.
 #
 #   ./uninstall.sh           keep downloads (~/.local/share/glitch) and settings
 #   ./uninstall.sh --purge   also delete downloads, ~/.config/glitch and ~/.local/state/glitch

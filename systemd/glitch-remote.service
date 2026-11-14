@@ -6,7 +6,6 @@ After=graphical-session.target
 ConditionEnvironment=WAYLAND_DISPLAY
 
 [Service]
-# Runs in WORKDIR with REMOTE_PERMISSION_MODE (glitch.conf).
 ExecStart=%h/.local/bin/glitch _remote
 # The status screen redraws every second; keep only stderr
 StandardOutput=null

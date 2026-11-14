@@ -106,9 +106,11 @@ unpaired. Without a paired cookie, a non-public GET outside /api/ and /clips/ ge
 Content-Security-Policy default-src 'self'; frame-ancestors 'none', plus hashes for an
 HTML page's inline <style> and <script> blocks.
   public  GET /pair (the pairing page), /manifest.webmanifest, /icon-*.png
-          GET /setup (how to install the CA file, with its SHA-256 for the user to compare
-          against the desk's), /glitch-ca.crt (DATA/portal/glitch-ca.crt, as a download). A
-          phone that doesn't trust the certificate yet reads both past the browser's warning.
+          GET /setup (how to install the CA file and check it), /glitch-ca.crt
+          (DATA/portal/glitch-ca.crt, as a download); both no-store, 404 with no CA file. A
+          phone that doesn't trust the certificate yet reads both past the browser's warning,
+          so neither is authenticated: the user compares the installed certificate's SHA-256,
+          as Android shows it, with the one `glitch phone` prints at the desk.
           POST /api/pair {code} -> {ok} with the cookie, or 403
   GET  /, web/* files   the page; HTML sets the cookie again (glitch_device, HttpOnly,
                         Secure, SameSite=Lax: a home-screen launch sends no Strict cookie)
@@ -218,13 +220,15 @@ SETUP_PAGE = b"""<!doctype html><meta charset=utf-8><meta name=viewport content=
 <style>html,body{margin:0;background:#0a0b0e;color:#9ba0a8;font:16px/1.5 system-ui,sans-serif}
 main{max-width:26em;margin:auto;padding:28px 24px}h1{font-size:18px;font-weight:500;color:#e6e8ec;margin:0 0 18px}
 ol{padding-left:1.3em;margin:0}li{margin:0 0 18px}b{color:#d8dbe0;font-weight:500}
-code{display:block;margin-top:8px;font:13px/1.6 ui-monospace,monospace;color:#e6e8ec;word-break:break-all}
 a{display:inline-block;margin-top:8px;color:#d8dbe0;text-decoration:none;border:1px solid #2a2d33;border-radius:99px;padding:10px 22px}</style>
 <main><h1>Set up this phone for glitch</h1><ol>
-<li>Check that this fingerprint is the one <b>glitch phone</b> printed at the desk. If it isn't, stop here.<code>FINGERPRINT</code></li>
-<li>Download the certificate.<br><a href="/glitch-ca.crt" download>Download</a></li>
-<li>Install it: <b>Settings &gt; Security &gt; Encryption &amp; credentials &gt; Install a certificate &gt; CA certificate</b>,
-then pick glitch-ca.crt from Downloads. It vouches only for this one address, and its key no longer exists.</li>
+<li>Download the certificate. If Android opens a certificate dialog afterwards, cancel it: a CA certificate
+installs only from Settings.<br><a href="/glitch-ca.crt" download>Download</a></li>
+<li>Install it: <b>Settings &gt; Security &amp; privacy &gt; More security settings &gt; Encryption &amp; credentials &gt;
+Install a certificate &gt; CA certificate</b> (or search Settings for &ldquo;CA certificate&rdquo;), then pick glitch-ca.crt from Downloads.</li>
+<li>Check what was installed: in <b>Encryption &amp; credentials &gt; Trusted credentials &gt; User</b>, tap the glitch
+certificate. Its SHA-256 fingerprint must be the one <b>glitch phone</b> printed at the desk. If it isn't, remove it:
+something on the network answered in your computer's place.</li>
 <li>Open glitch and pair.<br><a href="/">Open glitch</a></li></ol></main>"""
 
 
@@ -698,10 +702,7 @@ class Handler(BaseHTTPRequestHandler):
             except OSError:
                 return self.send_json(404, {"error": "not found"})
             if path == "/setup":
-                fp = hashlib.sha256(ca).hexdigest().upper()
-                fp = ":".join(fp[i:i + 2] for i in range(0, len(fp), 2))
-                return self.send(200, SETUP_PAGE.replace(b"FINGERPRINT", fp.encode()), TYPES[".html"],
-                                 {"Cache-Control": "no-store"})
+                return self.send(200, SETUP_PAGE, TYPES[".html"], {"Cache-Control": "no-store"})
             return self.send(200, ca, "application/x-x509-ca-cert",
                              {"Cache-Control": "no-store", "Content-Disposition": 'attachment; filename="glitch-ca.crt"'})
         name = path.rsplit("/", 1)[-1]

@@ -23,8 +23,6 @@ CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}"
 PLUGIN_ID=dragland.glitch
 
 LLAMA_BUILD=b11552
-# One build per machine: Vulkan where a GPU driver offers it, else the CPU build
-# (the model is small enough for either).
 declare -A LLAMA_SHA=(
   [vulkan-x64]=c7bb933f3584b73296fbadea6e0d6273ddb7907699ec59ef08d0bb59e0a8b997
   [x64]=a45a6afda05d08028bd37998072ab602c96799bccde126835941623cb99bb727
@@ -58,7 +56,6 @@ for arg in "$@"; do
   case "$arg" in
   --no-mind) with_mind=0 ;;
   --no-voxtype) tweak_voxtype=0 ;;
-  --no-remote) echo "note: --no-remote is gone; remote control is off unless REMOTE=1 in ~/.config/glitch/glitch.conf" ;;
   --no-desktop) with_desktop=0 ;;
   -h | --help) sed -n '3,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
   *) echo "Unknown option: $arg" >&2; exit 1 ;;
@@ -105,11 +102,12 @@ for cmd in jq curl pw-play hyprctl; do
   command -v "$cmd" >/dev/null || die "missing $cmd"
 done
 if ! command -v voxtype >/dev/null; then
-  die "voxtype (dictation) isn't installed; run: omarchy-voxtype-install"
+  die "voxtype (dictation) isn't installed; run: omarchy install dictation voxtype"
 fi
 agent=$(omarchy-default-agent 2>/dev/null || true)
-if [[ -n ${agent:-} && $agent != claude ]]; then
-  echo "    note: glitch drives Claude Code (your Omarchy default agent '$agent' has no glitch adapter yet)."
+if [[ -n ${agent:-} && $agent != claude && $agent != codex ]]; then
+  echo "    note: glitch has no adapter for your Omarchy default agent '$agent'; it will drive Claude Code."
+  agent=claude
 fi
 case $(uname -m) in
 x86_64) arch=x64 ;;
@@ -120,7 +118,7 @@ if ((with_mind)) && [[ -z $arch ]]; then
   echo "    note: no llama.cpp build for $(uname -m); installing without the local model (as --no-mind)"
   with_mind=0
 fi
-command -v claude >/dev/null || echo "    note: claude isn't on PATH yet; install Claude Code before talking to glitch"
+command -v "${agent:-claude}" >/dev/null || echo "    note: ${agent:-claude} isn't on PATH yet; install it before talking to glitch"
 if ! command -v uv >/dev/null; then
   command -v mise >/dev/null || die "need uv (or mise to install it): https://docs.astral.sh/uv/"
   mise use -g uv@latest >/dev/null
@@ -141,19 +139,18 @@ mkdir -p "$DATA/voices"
 fetch "$VOICE_URL.onnx" "$DATA/voices/$VOICE.onnx" "$VOICE_SHA"
 fetch "$VOICE_URL.onnx.json" "$DATA/voices/$VOICE.onnx.json" "$VOICE_JSON_SHA"
 
+((with_mind)) || [[ $(conf MUTTER) != 1 ]] || echo "    note: MUTTER=1 needs the local model, so there is no mutter without it"
 if ((with_mind)); then
   step "Mind (llama.cpp $LLAMA_BUILD + $MODEL)"
   mkdir -p "$DATA/models"
   # A Vulkan driver (an ICD) and the loader; a software rasteriser (lavapipe) alone is slower than the CPU build.
+  # No grep -q on ldconfig: it would close the pipe early, and pipefail turns that into a failure.
   variant=$arch
-  if ldconfig -p 2>/dev/null | grep -q 'libvulkan\.so\.1' &&
-    compgen -G '/usr/share/vulkan/icd.d/*.json' | grep -qv lvp; then
+  icds=$(cat /usr/share/vulkan/icd.d/*.json /etc/vulkan/icd.d/*.json 2>/dev/null | grep library_path | grep -v lvp || true)
+  if [[ -n $icds && -n $(ldconfig -p 2>/dev/null | grep 'libvulkan\.so\.1' || true) ]]; then
     variant=vulkan-$arch
   fi
-  # An install from before there were variants wrote only the build, and was vulkan-x64.
-  have=$(cat "$DATA/llama/BUILD" 2>/dev/null || true)
-  [[ $have == "$LLAMA_BUILD" ]] && have="$LLAMA_BUILD vulkan-x64"
-  if [[ ! -x $DATA/llama/llama-server || $have != "$LLAMA_BUILD $variant" ]]; then
+  if [[ ! -x $DATA/llama/llama-server || $(cat "$DATA/llama/BUILD" 2>/dev/null || true) != "$LLAMA_BUILD $variant" ]]; then
     tmp=$(mktemp -d)
     curl -fL --progress-bar -o "$tmp/llama.tgz" \
       "https://github.com/ggml-org/llama.cpp/releases/download/$LLAMA_BUILD/llama-$LLAMA_BUILD-bin-ubuntu-$variant.tar.gz"
@@ -196,9 +193,15 @@ if ((with_mind)); then
 fi
 
 step "Linking code into place"
+# `omarchy plugin add` clones the repo to this path. Any other checkout links only plugin/ there:
+# omarchy plugin update treats a linked repo root as its own clone, fails to validate the link,
+# and hard-resets the checkout.
+plugin_dir="$CONFIG/omarchy/plugins/$PLUGIN_ID"
+if [[ ! $REPO -ef $plugin_dir ]]; then
+  [[ -e $plugin_dir && ! -L $plugin_dir ]] && die "${plugin_dir/#$HOME/~} is another copy of glitch; run its install.sh, or remove it with: omarchy plugin remove $PLUGIN_ID"
+  link "$REPO/plugin" "$plugin_dir"
+fi
 link "$REPO/bin/glitch" "$HOME/.local/bin/glitch"
-# `omarchy plugin add` clones the repo to this path; any other checkout is linked there.
-[[ $REPO -ef $CONFIG/omarchy/plugins/$PLUGIN_ID ]] || link "$REPO" "$CONFIG/omarchy/plugins/$PLUGIN_ID"
 link "$REPO/hypr/glitch.lua" "$CONFIG/hypr/glitch.lua"
 mkdir -p "$CONFIG/glitch"
 if [[ ! -f $CONFIG/glitch/glitch.conf ]]; then
@@ -208,8 +211,8 @@ fi
 
 step "Orb shader"
 qsb_out="$REPO/plugin/glitch.frag.qsb"
-# Only for an edited orb.glsl: a rebuild of the committed one would leave the checkout
-# changed, and `omarchy plugin update` pulls only into a clean one.
+# Only for an edited orb.glsl: a rebuilt glitch.frag.qsb is a local change, and
+# `omarchy plugin update` can't fast-forward over one.
 if [[ ! -s $qsb_out ]] || ! git -C "$REPO" diff --quiet HEAD -- plugin/orb.glsl 2>/dev/null; then
   if "$REPO/plugin/build-shader"; then
     ok "compiled orb.glsl"
@@ -261,11 +264,10 @@ step "Remote control (sessions from the Claude app)"
 workdir=$(conf WORKDIR)
 if [[ $(conf REMOTE) != 1 ]]; then
   systemctl --user disable --now glitch-remote-reap.timer >/dev/null 2>&1 || true
-  if systemctl --user is-active --quiet glitch-remote.service; then
-    echo "    note: glitch-remote is still running; stop it with: systemctl --user disable --now glitch-remote"
-  else
-    systemctl --user disable glitch-remote.service >/dev/null 2>&1 || true
-  fi
+  # Not --now: stopping it would cut off its sessions mid-turn.
+  systemctl --user disable glitch-remote.service >/dev/null 2>&1 || true
+  systemctl --user is-active --quiet glitch-remote.service &&
+    echo "    note: glitch-remote is still running until you log out; stop it now with: systemctl --user stop glitch-remote"
   ok "off (to list this machine in the Claude app: REMOTE=1 in ~/.config/glitch/glitch.conf, then re-run ./install.sh)"
 else
   ok "sessions started from the app run in ${workdir/#$HOME/~} with permission mode $(conf REMOTE_PERMISSION_MODE)"
@@ -273,9 +275,8 @@ else
     link "$REPO/systemd/$u" "$CONFIG/systemd/user/$u"
   done
   systemctl --user daemon-reload
-  # The service has no TTY for Claude's one-time "Enable Remote Control?"
-  # (remoteDialogSeen, undocumented: re-check when Claude changes) or the trust
-  # prompt for WORKDIR; without both, the server exits and restarts every 30 s.
+  # The service has no TTY for Claude's one-time prompts (AGENTS.md); without both
+  # answered, the server exits and restarts every 30 s.
   if [[ -d $workdir ]] && jq -e --arg dir "$workdir" '.remoteDialogSeen and .projects[$dir].hasTrustDialogAccepted' \
     "$HOME/.claude.json" >/dev/null 2>&1; then
     # Start only a stopped server: a restart would cut off its sessions mid-turn.
@@ -286,7 +287,7 @@ else
       sleep 5 # a server that can't start (signed out, folder already served) exits within seconds
     fi
     if systemctl --user is-active --quiet glitch-remote.service; then
-      ok "$(hostname) shows up in the Claude app (Code tab)"
+      ok "$(hostname) shows up in the Claude app (Code tab); a changed WORKDIR or mode applies after: systemctl --user restart glitch-remote"
     else
       echo "    warning: glitch-remote isn't running (journalctl --user -u glitch-remote)"
     fi
@@ -299,8 +300,6 @@ fi
 step "Phone portal"
 link "$REPO/systemd/glitch-portal.service" "$CONFIG/systemd/user/glitch-portal.service"
 systemctl --user daemon-reload
-# Once `glitch phone` has turned it on, an update restarts it onto the new code.
-# Safe mid-turn: KillMode=process leaves a running phone turn alone.
 if systemctl --user is-enabled --quiet glitch-portal.service 2>/dev/null; then
   systemctl --user restart glitch-portal.service >/dev/null 2>&1 || true
   sleep 2
