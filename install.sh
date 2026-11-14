@@ -146,7 +146,7 @@ if ((with_mind)); then
   # A Vulkan driver (an ICD) and the loader; a software rasteriser (lavapipe) alone is slower than the CPU build.
   # No grep -q on ldconfig: it would close the pipe early, and pipefail turns that into a failure.
   variant=$arch
-  icds=$(cat /usr/share/vulkan/icd.d/*.json /etc/vulkan/icd.d/*.json 2>/dev/null | grep library_path | grep -v lvp || true)
+  icds=$(grep -hs library_path /usr/share/vulkan/icd.d/*.json /etc/vulkan/icd.d/*.json | grep -v lvp || true)
   if [[ -n $icds && -n $(ldconfig -p 2>/dev/null | grep 'libvulkan\.so\.1' || true) ]]; then
     variant=vulkan-$arch
   fi
@@ -197,7 +197,7 @@ step "Linking code into place"
 # omarchy plugin update treats a linked repo root as its own clone, fails to validate the link,
 # and hard-resets the checkout.
 plugin_dir="$CONFIG/omarchy/plugins/$PLUGIN_ID"
-if [[ ! $REPO -ef $plugin_dir ]]; then
+if [[ -L $plugin_dir || ! $REPO -ef $plugin_dir ]]; then
   [[ -e $plugin_dir && ! -L $plugin_dir ]] && die "${plugin_dir/#$HOME/~} is another copy of glitch; run its install.sh, or remove it with: omarchy plugin remove $PLUGIN_ID"
   link "$REPO/plugin" "$plugin_dir"
 fi
@@ -343,7 +343,7 @@ step "Shell plugin"
 omarchy-shell -q shell rescanPlugins >/dev/null 2>&1 || true
 sleep 1
 omarchy plugin enable "$PLUGIN_ID" >/dev/null
-omarchy restart shell >/dev/null 2>&1
+omarchy restart shell >/dev/null 2>&1 || die "couldn't restart the Omarchy shell (it refuses while the screen is locked); unlock and re-run ./install.sh"
 for _ in $(seq 1 20); do omarchy-shell -q glitch ping >/dev/null 2>&1 && break; sleep 0.5; done
 omarchy-shell -q glitch ping >/dev/null 2>&1 && ok "orb loaded" || die "the orb plugin didn't load (quickshell log -p \$OMARCHY_PATH/shell)"
 
