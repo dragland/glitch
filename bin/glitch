@@ -233,9 +233,11 @@ phone_fresh() {
   [[ -d $PH ]] && phone_send "{\"type\":\"fresh\"${1:+,\"idle\":true}}"
 }
 
+# No argument is a timer started before the card had its own setting.
 cmd_expire() {
-  close_card
-  [[ -n $(turn_portal) ]] || phone_fresh idle
+  [[ ${1:-card} == card ]] && close_card
+  [[ ${1:-session} == session && -z $(turn_portal) ]] && phone_fresh idle
+  return 0
 }
 
 reactions() {
@@ -360,15 +362,20 @@ close_card() {
 
 card_sweep() {
   [[ -e $CARD && -z $(turn_portal) ]] || return 0
-  [[ -e $RT/notify.id ]] && ((EPOCHSECONDS - $(stat -c %Y "$RT/sid" 2>/dev/null || echo 0) < RESUME_WINDOW + 60)) && return 0
+  [[ -e $RT/notify.id ]] && ((EPOCHSECONDS - $(stat -c %Y "$RT/sid" 2>/dev/null || echo 0) < CARD_SECONDS + 60)) && return 0
   close_card && log "card swept"
 }
 
 expire_later() {
   local mt
   mt=$(stat -c %Y "$RT/sid" 2>/dev/null) || return 0
-  setsid bash -c 'sleep "$1"; [[ $(stat -c %Y "$2" 2>/dev/null) == "$3" ]] && exec "$4" _expire' _ $((RESUME_WINDOW + 2)) "$RT/sid" "$mt" "$0" \
-    </dev/null >/dev/null 2>&1 8>&- 9>&- &
+  local what secs
+  for what in card session; do
+    secs=$CARD_SECONDS
+    [[ $what == session ]] && secs=$RESUME_WINDOW
+    setsid bash -c 'sleep "$1"; [[ $(stat -c %Y "$2" 2>/dev/null) == "$3" ]] && exec "$4" _expire "$5"' _ $((secs + 2)) "$RT/sid" "$mt" "$0" "$what" \
+      </dev/null >/dev/null 2>&1 8>&- 9>&- &
+  done
 }
 
 # --- live reactions (the local decision model, see libexec/decide) --------------
@@ -919,7 +926,7 @@ cmd_turn() {
     phone_send "$(jqs '{type:"reply", summary:$s[0], body:$s[1][0:4000], speech:($s[2] == "true")}' \
       -- "$say" "${failed:-$result}" "$([[ -s $RT/say.wav ]] && echo true || echo false)")"
   else
-    notify "$summary" "$body" --exec "$0" open &
+    ((CARD_SECONDS > 0)) && notify "$summary" "$body" --exec "$0" open &
   fi
   set_state "$state" "$say"
   (
@@ -1361,7 +1368,7 @@ cert) cmd_cert "${2:-}" ;;
 phone) cmd_phone "${2:-}" ;;
 _live) cmd_live ;;
 _mutter) cmd_mutter ;;
-_expire) cmd_expire ;;
+_expire) cmd_expire "${2:-}" ;;
 _approve) cmd_approve ;;
 _reap) cmd_reap ;;
 open) cmd_open ;;

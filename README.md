@@ -73,8 +73,9 @@ leaves the root part of desktop control: `sudo pacman -R ydotool && sudo rm
 | Super+Alt+Backspace | cancel the recording, the turn and the speech |
 
 A tap while glitch is talking just quiets it, and "new task, …" starts fresh
-by voice. While the reply card is on screen (15 minutes after the last turn),
-the next Super+D continues that session.
+by voice. For 15 minutes after a turn the next Super+D continues that session
+(`RESUME_WINDOW`), and the reply card stays on screen as long (`CARD_SECONDS`,
+set separately; 0 shows no card).
 
 The agent runs the way `omarchy-agent` runs it (Claude in auto mode, Codex
 with `--approve-for-me`). When Claude would ask your permission, the orb asks
