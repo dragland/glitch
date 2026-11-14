@@ -3,10 +3,12 @@
 
     echo "I'm checking how the timer is set up. Then ..." | mandarin
 
-Takes the thought's first sentence, has glitch-mind (the local Qwen3) say it in simple
-Mandarin, and prints {"en", "zh", "pinyin", "ruby"}: ruby is the line cut into
-[text, pinyin] pairs, one per character, with "" for what has no reading. Prints nothing if the model is away, slow
-or answers with something that isn't a short Chinese sentence; errors go to stderr.
+Has glitch-mind (the local Qwen3) say the thought's first sentence in simple Mandarin
+and prints {"en", "rest", "zh"}: the sentence, what followed it in the thought, and
+the line. The line holds only Chinese characters, digits and Chinese punctuation:
+Piper's Chinese voices speak Latin letters as stray syllables, and the line is shown
+large on the phone. Prints nothing when the sentence is under MIN_EN characters, the
+model is away or slow, or its answer is not such a line; errors go to stderr.
 """
 
 import json
@@ -23,59 +25,46 @@ SYSTEM = ("You translate an AI assistant's working thoughts into Mandarin for a 
           "simply instead. Output only the Chinese sentence.")
 MIN_EN, MAX_EN, MAX_ZH = 12, 240, 40
 HAN = re.compile(r"[一-鿿]")
+FILE = re.compile(r"`?[\w~.-]*(/[\w.-]+)+/?`?|`?\b[\w-]+\.[a-z]{1,5}\b`?")
+CODE = re.compile(r"`[^`]+`|\b\w+_\w+\b(\(\))?|\b\w+\(\)|\b[a-z]+[A-Z]\w*\b")
+LINE = re.compile(r"[一-鿿0-9.%，。！？、；：…—\s]+")
+TITLE = re.compile(r"^\s*\*\*[^*\n]*\*\*\s*")
+END = re.compile(r"[.!?]+[\"')\]]*(?=\s+[A-Z\"'(\[]|\s*$)")
 
 
-def first_sentence(text):
-    text = " ".join(text.split())
-    m = re.search(r"[.!?](\s|$)", text)
-    return (text[:m.end()] if m else text).strip()[:MAX_EN]
+def split(thought):
+    """The first sentence and the rest. A summarised thought can open with a bold title."""
+    text = " ".join(TITLE.sub("", thought).split())
+    m = END.search(text)
+    en = text[:m.end()] if m else text
+    return en[:MAX_EN], text[len(en):].strip()
 
 
 def translate(en):
-    # Qwen3 thinks before answering unless the turn ends in /no_think.
-    body = {"messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": en + " /no_think"}],
-            "temperature": 0.2, "max_tokens": 60}
+    """The model copies an identifier into the line whatever the prompt says, so it
+    is given the sentence with each one named for what it is."""
+    en = CODE.sub("the code", FILE.sub("the file", en))
+    # Qwen3 spends the whole answer thinking unless its template is told not to.
+    body = {"messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": en}],
+            "chat_template_kwargs": {"enable_thinking": False}, "temperature": 0.2, "max_tokens": 60}
     with open(KEY) as f:
         key = f.read().strip()
     req = urllib.request.Request(URL, json.dumps(body).encode(),
                                  {"Content-Type": "application/json", "Authorization": f"Bearer {key}"})
     with urllib.request.urlopen(req, timeout=6) as r:
-        out = json.load(r)["choices"][0]["message"]["content"]
-    out = re.sub(r"<think>.*?</think>", "", out, flags=re.DOTALL).strip().splitlines()
+        out = json.load(r)["choices"][0]["message"]["content"].strip().splitlines()
     return out[0].strip(" \"'“”「」") if out else ""
 
 
-def ruby(zh):
-    """pypinyin reads the whole line (so 行 in 银行 is háng) and gives one item per
-    character, or a run of other text back as it was."""
-    try:
-        from pypinyin import Style, lazy_pinyin
-    except ImportError:
-        return []
-    out, i = [], 0
-    for item in lazy_pinyin(zh, style=Style.TONE):
-        if i < len(zh) and HAN.match(zh[i]):
-            out.append([zh[i], item])
-            i += 1
-        elif zh.startswith(item, i) and item:
-            out.append([item, ""])
-            i += len(item)
-        else:
-            return []
-    return out if i == len(zh) else []
-
-
 def main():
-    en = first_sentence(sys.stdin.read())
+    en, rest = split(sys.stdin.read())
     if len(en) < MIN_EN:
         return 0
     zh = translate(en)
-    if not zh or len(zh) > MAX_ZH or len(HAN.findall(zh)) < 2:
+    if len(zh) > MAX_ZH or len(HAN.findall(zh)) < 2 or not LINE.fullmatch(zh):
         print(f"mandarin: unusable answer {zh!r}", file=sys.stderr)
         return 0
-    pairs = ruby(zh)
-    spoken = re.sub(r"\s+(?=[，。！？、；：])", "", " ".join(p or t.strip() for t, p in pairs if p or t.strip()))
-    print(json.dumps({"en": en, "zh": zh, "pinyin": spoken, "ruby": pairs}, ensure_ascii=False))
+    print(json.dumps({"en": en, "rest": rest, "zh": zh}, ensure_ascii=False))
     return 0
 
 
