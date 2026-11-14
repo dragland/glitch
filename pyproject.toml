@@ -1,7 +1,7 @@
 [project]
 name = "glitch"
 version = "0.1.0"
-description = "Python side of glitch: Piper voice (libexec/speak), the Beep Jev beep synth (libexec/cue), the decision client (libexec/decide) and the mutter's pinyin (libexec/speak)."
+description = "glitch's Python side: the Piper voice, the beep synth, the decision client and the phone portal."
 requires-python = ">=3.12"
 dependencies = [
   "piper-tts[zh]==1.8.0",
