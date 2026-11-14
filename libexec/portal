@@ -42,6 +42,12 @@ Events. Each carries its "type". bin/glitch writes all but `turn` and `hello`.
   reply    {summary, body, speech}  summary: the spoken line, the one that would be spoken,
            or ""; body: the full reply or the error, up to 4000 characters; speech: whether
            a say clip follows
+  trace    {kind, text, zh, pinyin, clip}  what the agent is doing, for the page to list
+           during a turn. kind think: one of its thoughts (a summary of its reasoning);
+           note: a message it wrote before a tool call; zh: a thought being muttered in
+           Mandarin, where text is the English, zh and pinyin the line, and clip the id of
+           its mutter clip. text is at most 800 characters. A `heard`, a `fresh` or a
+           "turn" signal ends the list; this server keeps the last TRACE_KEPT for hello.
   approve  {id, ask, label, short, cut, oneline, timeout, left}
            ask: the question to show.
            label: the whole tool input, up to 20000 characters. Bash/Shell (the command),
@@ -69,18 +75,20 @@ Events. Each carries its "type". bin/glitch writes all but `turn` and `hello`.
                           drops that one, unrelayed, while a reply is unheard, and a page on
                           screen keeps the exchange until it is hidden.
   turn     {turn}         desk|phone|null, when RT/turn.portal changes
-  hello    {state, turn, approve: [approve...], heard, reply, replay: [clip...]}  first on
-           every /api/events stream: the last state event, heard text and reply event, the
-           pending approvals and the speech clips not yet played. A new turn on either
+  hello    {state, turn, approve: [approve...], heard, reply, trace: [trace...], replay: [clip...]}
+           first on every /api/events stream: the last state event, heard text and reply
+           event, the turn's trace, the pending approvals and the speech clips not yet played. A new turn on either
            portal drops the earlier turn's unplayed speech from replay.
 
-Clips. kind: cue, say, ask or aside. ms: its length. env: the orb's "say" payload
+Clips. kind: cue, say, ask, aside or mutter. ms: its length. env: the orb's "say" payload
 ("<hz> <v>...") or null. url: "/clips/<id>". A cue plays on arrival, over anything.
 Speech (say, ask, aside) plays one clip at a time in arrival order, and the page POSTs
 /api/played {id} when each one ends. bin/glitch waits for that, for ms + 2 s at most,
 or not at all with no page connected. A clip with `with` set starts no sooner than
 `delay` ms after clip `with` started. An ask clip belongs to approval `approve`: this
-server drops it once that is answered, and the page stops it on `approved`.
+server drops it once that is answered, and the page stops it on `approved`. A mutter
+plays in the same line as speech but is nobody's to wait for: no /api/played, no replay,
+and the page drops it for a reply, an approval, other speech or a recording.
 
 Routes. Every request: Host must be ADDR:PORT, else 421. Every POST: Origin must be this
 origin, else 403. /api/* and /clips/* answer navigations (Sec-Fetch-Mode navigate or
@@ -148,7 +156,7 @@ PUBLIC = {("GET", "/pair"), ("POST", "/api/pair"),
           ("GET", "/icon-mono-192.png"), ("GET", "/icon-mono-512.png")}
 AUDIO = {"audio/webm": "matroska", "video/webm": "matroska", "audio/ogg": "ogg", "audio/mp4": "mov",
          "audio/wav": "wav", "audio/x-wav": "wav", "audio/wave": "wav"}
-CLIP = re.compile(r"[0-9]+-(cue|say|ask|aside)\.wav")
+CLIP = re.compile(r"[0-9]+-(cue|say|ask|aside|mutter)\.wav")
 SOUND = re.compile(r"[a-z]+\.wav")
 PLUGIN_FILES = {"orb.mjs", "orb.glsl"}
 SPEECH = {"say", "ask", "aside"}
@@ -161,6 +169,7 @@ KNOWN_SECONDS = 30 * 86400
 PING_SECONDS = 5
 DEAD_PEER_MS = 20000
 PAIR_TRIES = 5
+TRACE_KEPT = 40
 NEED_AFTER = 5
 UNHEARD_AFTER = 3
 PUSH_HOSTS = {"fcm.googleapis.com", "updates.push.services.mozilla.com"}
@@ -267,6 +276,7 @@ class Portal:
         self.clients = set()
         self.state = self.heard = self.reply = self.turn = None
         self.unplayed = {}
+        self.trace = []
         self.pending = {}
         self.asked = {}
         self.pushed = set()
@@ -447,6 +457,7 @@ class Portal:
                 if ev["line"] == "turn":
                     self.unplayed.clear()
                     self.waiting = None
+                    self.trace = []
             elif t == "clip":
                 if ev.get("approve") and ev["approve"] not in self.pending:
                     return
@@ -463,10 +474,13 @@ class Portal:
                     return
                 self.state = self.heard = self.reply = self.waiting = None
                 self.unplayed.clear()
+                self.trace = []
             elif t == "state":
                 self.state = ev
             elif t == "heard":
-                self.heard, self.reply = ev.get("text"), None
+                self.heard, self.reply, self.trace = ev.get("text"), None, []
+            elif t == "trace":
+                self.trace = (self.trace + [ev])[-TRACE_KEPT:]
             elif t == "reply":
                 self.reply = ev
                 if self.live:
@@ -497,7 +511,7 @@ class Portal:
             replay = [c for c in self.unplayed.values()
                       if os.path.exists(self.path("clips", c["id"])) and not os.path.exists(self.path("clips", c["id"] + ".played"))]
             return {"type": "hello", "state": self.state, "turn": turn, "approve": [shown(a) for a in self.pending.values()],
-                    "heard": self.heard, "reply": self.reply, "replay": replay}
+                    "heard": self.heard, "reply": self.reply, "trace": self.trace, "replay": replay}
 
     def connect(self, q, on):
         with self.lock:

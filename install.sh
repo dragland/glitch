@@ -30,6 +30,10 @@ VOICE=en_US-kristin-medium
 VOICE_URL="https://huggingface.co/rhasspy/piper-voices/resolve/c10ece1aade47bb51c153c893d14e5bf8e5b7117/en/en_US/kristin/medium/$VOICE"
 VOICE_SHA=5849957f929cbf720c258f8458692d6103fff2f0e3d3b19c8259474bb06a18d4
 VOICE_JSON_SHA=5681426d4aead22195de70531eeeeddb46493cfaffc5764b2ea3db73428b651c
+MUTTER=zh_CN-huayan-medium
+MUTTER_URL="https://huggingface.co/rhasspy/piper-voices/resolve/c10ece1aade47bb51c153c893d14e5bf8e5b7117/zh/zh_CN/huayan/medium/$MUTTER"
+MUTTER_SHA=9929917bf8cabb26fd528ea44d3a6699c11e87317a14765312420be230be0f3d
+MUTTER_JSON_SHA=d521dc45504a8ccc99e325822b35946dd701840bfb07e3dbb31a40929ed6a82b
 
 with_mind=1
 tweak_voxtype=1
@@ -103,6 +107,8 @@ step "Voice"
 mkdir -p "$DATA/voices"
 fetch "$VOICE_URL.onnx" "$DATA/voices/$VOICE.onnx" "$VOICE_SHA"
 fetch "$VOICE_URL.onnx.json" "$DATA/voices/$VOICE.onnx.json" "$VOICE_JSON_SHA"
+fetch "$MUTTER_URL.onnx" "$DATA/voices/$MUTTER.onnx" "$MUTTER_SHA"
+fetch "$MUTTER_URL.onnx.json" "$DATA/voices/$MUTTER.onnx.json" "$MUTTER_JSON_SHA"
 
 if ((with_mind)); then
   step "Mind (llama.cpp $LLAMA_BUILD + $MODEL)"
