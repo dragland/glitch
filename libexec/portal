@@ -106,6 +106,9 @@ unpaired. Without a paired cookie, a non-public GET outside /api/ and /clips/ ge
 Content-Security-Policy default-src 'self'; frame-ancestors 'none', plus hashes for an
 HTML page's inline <style> and <script> blocks.
   public  GET /pair (the pairing page), /manifest.webmanifest, /icon-*.png
+          GET /setup (how to install the CA file, with its SHA-256 for the user to compare
+          against the desk's), /glitch-ca.crt (DATA/portal/glitch-ca.crt, as a download). A
+          phone that doesn't trust the certificate yet reads both past the browser's warning.
           POST /api/pair {code} -> {ok} with the cookie, or 403
   GET  /, web/* files   the page; HTML sets the cookie again (glitch_device, HttpOnly,
                         Secure, SameSite=Lax: a home-screen launch sends no Strict cookie)
@@ -159,7 +162,7 @@ from urllib.parse import urlsplit
 
 COOKIE = "glitch_device"
 COOKIE_AGE = 34560000  # Chrome caps a cookie's lifetime at 400 days, so every HTML response sets it again
-PUBLIC = {("GET", "/pair"), ("POST", "/api/pair"),
+PUBLIC = {("GET", "/pair"), ("POST", "/api/pair"), ("GET", "/setup"), ("GET", "/glitch-ca.crt"),
           ("GET", "/manifest.webmanifest"), ("GET", "/icon-192.png"), ("GET", "/icon-512.png"),
           ("GET", "/icon-mono-192.png"), ("GET", "/icon-mono-512.png")}
 AUDIO = {"audio/webm": "matroska", "video/webm": "matroska", "audio/ogg": "ogg", "audio/mp4": "mov",
@@ -209,6 +212,20 @@ f.onsubmit = async e => { e.preventDefault();
   if (r.ok) location = "/"; else m.textContent = "That code didn't work. Say \\u201cpair my phone\\u201d for a new one."; };
 fetch("/api/notice").then(r => { if (r.ok) location.replace("/") });
 </script>"""
+
+SETUP_PAGE = b"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width, initial-scale=1">
+<meta name=theme-color content="#0a0b0e"><meta name=color-scheme content=dark><title>glitch setup</title>
+<style>html,body{margin:0;background:#0a0b0e;color:#9ba0a8;font:16px/1.5 system-ui,sans-serif}
+main{max-width:26em;margin:auto;padding:28px 24px}h1{font-size:18px;font-weight:500;color:#e6e8ec;margin:0 0 18px}
+ol{padding-left:1.3em;margin:0}li{margin:0 0 18px}b{color:#d8dbe0;font-weight:500}
+code{display:block;margin-top:8px;font:13px/1.6 ui-monospace,monospace;color:#e6e8ec;word-break:break-all}
+a{display:inline-block;margin-top:8px;color:#d8dbe0;text-decoration:none;border:1px solid #2a2d33;border-radius:99px;padding:10px 22px}</style>
+<main><h1>Set up this phone for glitch</h1><ol>
+<li>Check that this fingerprint is the one <b>glitch phone</b> printed at the desk. If it isn't, stop here.<code>FINGERPRINT</code></li>
+<li>Download the certificate.<br><a href="/glitch-ca.crt" download>Download</a></li>
+<li>Install it: <b>Settings &gt; Security &gt; Encryption &amp; credentials &gt; Install a certificate &gt; CA certificate</b>,
+then pick glitch-ca.crt from Downloads. It vouches only for this one address, and its key no longer exists.</li>
+<li>Open glitch and pair.<br><a href="/">Open glitch</a></li></ol></main>"""
 
 
 def sha(s):
@@ -674,6 +691,19 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(200, {"key": self.p.vapid.key})
         if path == "/pair":
             return self.send(200, PAIR_PAGE, TYPES[".html"])
+        if path in ("/setup", "/glitch-ca.crt"):
+            try:
+                with open(os.path.join(self.p.a.data, "portal", "glitch-ca.crt"), "rb") as fh:
+                    ca = fh.read()
+            except OSError:
+                return self.send_json(404, {"error": "not found"})
+            if path == "/setup":
+                fp = hashlib.sha256(ca).hexdigest().upper()
+                fp = ":".join(fp[i:i + 2] for i in range(0, len(fp), 2))
+                return self.send(200, SETUP_PAGE.replace(b"FINGERPRINT", fp.encode()), TYPES[".html"],
+                                 {"Cache-Control": "no-store"})
+            return self.send(200, ca, "application/x-x509-ca-cert",
+                             {"Cache-Control": "no-store", "Content-Disposition": 'attachment; filename="glitch-ca.crt"'})
         name = path.rsplit("/", 1)[-1]
         if path == "/clips/" + name and CLIP.fullmatch(name):
             return self.send_file(self.p.path("clips", name), cache="private, max-age=3600")

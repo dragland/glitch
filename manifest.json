@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "dragland.glitch",
+  "name": "Glitch",
+  "version": "0.1.0",
+  "author": "dragland",
+  "license": "MIT",
+  "description": "A voice companion for your coding agent: tap a key, talk, and an orb shows what it is doing. Run install.sh after adding it.",
+  "kinds": [
+    "panel"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "panel": "plugin/Glitch.qml"
+  }
+}

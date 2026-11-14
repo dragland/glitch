@@ -17,7 +17,7 @@ import re
 import sys
 import urllib.request
 
-URL = "http://127.0.0.1:8765/v1/chat/completions"
+URL = f"http://127.0.0.1:{os.environ.get('GLITCH_MIND_PORT') or 8765}/v1/chat/completions"
 KEY = os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "glitch", "mind.key")
 SYSTEM = ("You translate an AI assistant's working thoughts into Mandarin for a beginner learner. "
           "Reply with one short, natural spoken sentence in Simplified Chinese, 20 characters at most, "

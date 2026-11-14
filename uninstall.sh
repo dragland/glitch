@@ -21,6 +21,7 @@ systemctl --user daemon-reload
 
 omarchy plugin disable "$PLUGIN_ID" >/dev/null 2>&1
 unlink_if_link "$CONFIG/omarchy/plugins/$PLUGIN_ID"
+[[ -d $CONFIG/omarchy/plugins/$PLUGIN_ID ]] && echo "    the plugin's folder is this checkout; finish with: omarchy plugin remove $PLUGIN_ID"
 omarchy-shell -q shell rescanPlugins >/dev/null 2>&1
 
 hypr="$CONFIG/hypr/hyprland.lua"

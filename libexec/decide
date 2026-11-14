@@ -29,7 +29,7 @@ import traceback
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, wait
 
-LOCAL_URL = "http://127.0.0.1:8765/completion"
+LOCAL_URL = f"http://127.0.0.1:{os.environ.get('GLITCH_MIND_PORT') or 8765}/completion"
 LOCAL_KEY = os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "glitch", "mind.key")
 SLOTS = 2  # glitch-mind runs -np 2
 SYSTEM = ("You choose how an animated companion orb expresses an AI "

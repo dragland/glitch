@@ -6,8 +6,10 @@
 #   ./install.sh                 everything
 #   ./install.sh --no-mind       skip the local decision model (orb uses reactions.json)
 #   ./install.sh --no-voxtype    don't touch voxtype's config
-#   ./install.sh --no-remote     skip remote control (sessions from the Claude app)
 #   ./install.sh --no-desktop    skip desktop control (agents' clicks and keys)
+#
+# Remote control (sessions from the Claude app) and the phone portal are off until
+# you turn them on: REMOTE=1 in ~/.config/glitch/glitch.conf, and `glitch phone`.
 #
 # Only desktop control needs root, once (ydotool and /dev/uinput). Downloads
 # (~1.5 GB with the mind) go to ~/.local/share/glitch, pinned and checksummed
@@ -21,8 +23,14 @@ CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}"
 PLUGIN_ID=dragland.glitch
 
 LLAMA_BUILD=b11552
-LLAMA_URL="https://github.com/ggml-org/llama.cpp/releases/download/$LLAMA_BUILD/llama-$LLAMA_BUILD-bin-ubuntu-vulkan-x64.tar.gz"
-LLAMA_SHA=c7bb933f3584b73296fbadea6e0d6273ddb7907699ec59ef08d0bb59e0a8b997
+# One build per machine: Vulkan where a GPU driver offers it, else the CPU build
+# (the model is small enough for either).
+declare -A LLAMA_SHA=(
+  [vulkan-x64]=c7bb933f3584b73296fbadea6e0d6273ddb7907699ec59ef08d0bb59e0a8b997
+  [x64]=a45a6afda05d08028bd37998072ab602c96799bccde126835941623cb99bb727
+  [vulkan-arm64]=c832d1e635d4abdc4de366b1540cf407ca3ed5c8c90a214e2cc1ae1d30c2b9d6
+  [arm64]=8c5e5074c4e303308367471941b70a0f1fac4a1a35c7c67c0bec895d8df092f9
+)
 MODEL=Qwen3-1.7B-Q4_K_M.gguf
 MODEL_URL="https://huggingface.co/unsloth/Qwen3-1.7B-GGUF/resolve/d7f544eead698dbd1f15126ef60b45a1e1933222/$MODEL"
 MODEL_SHA=b139949c5bd74937ad8ed8c8cf3d9ffb1e99c866c823204dc42c0d91fa181897
@@ -45,15 +53,14 @@ BERT_CONFIG_SHA=0f6d13e6f4da6f9e24f22ada6bc3be571123d858d7c0c05a8a7cd55a9c23c2e8
 
 with_mind=1
 tweak_voxtype=1
-with_remote=1
 with_desktop=1
 for arg in "$@"; do
   case "$arg" in
   --no-mind) with_mind=0 ;;
   --no-voxtype) tweak_voxtype=0 ;;
-  --no-remote) with_remote=0 ;;
+  --no-remote) echo "note: --no-remote is gone; remote control is off unless REMOTE=1 in ~/.config/glitch/glitch.conf" ;;
   --no-desktop) with_desktop=0 ;;
-  -h | --help) sed -n '3,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  -h | --help) sed -n '3,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
   *) echo "Unknown option: $arg" >&2; exit 1 ;;
   esac
 done
@@ -83,6 +90,15 @@ fetch() {
   ok "have ${out/#$HOME/~}"
 }
 
+conf() (
+  set +u
+  {
+    . "$REPO/config/glitch.conf"
+    [[ -f $CONFIG/glitch/glitch.conf ]] && . "$CONFIG/glitch/glitch.conf"
+  } >/dev/null
+  printf '%s' "${!1}"
+)
+
 step "Checking requirements"
 command -v omarchy-shell >/dev/null || die "this needs Omarchy 4 (omarchy-shell not found)"
 for cmd in jq curl pw-play hyprctl; do
@@ -94,6 +110,15 @@ fi
 agent=$(omarchy-default-agent 2>/dev/null || true)
 if [[ -n ${agent:-} && $agent != claude ]]; then
   echo "    note: glitch drives Claude Code (your Omarchy default agent '$agent' has no glitch adapter yet)."
+fi
+case $(uname -m) in
+x86_64) arch=x64 ;;
+aarch64) arch=arm64 ;;
+*) arch= ;;
+esac
+if ((with_mind)) && [[ -z $arch ]]; then
+  echo "    note: no llama.cpp build for $(uname -m); installing without the local model (as --no-mind)"
+  with_mind=0
 fi
 command -v claude >/dev/null || echo "    note: claude isn't on PATH yet; install Claude Code before talking to glitch"
 if ! command -v uv >/dev/null; then
@@ -119,17 +144,27 @@ fetch "$VOICE_URL.onnx.json" "$DATA/voices/$VOICE.onnx.json" "$VOICE_JSON_SHA"
 if ((with_mind)); then
   step "Mind (llama.cpp $LLAMA_BUILD + $MODEL)"
   mkdir -p "$DATA/models"
-  if [[ ! -x $DATA/llama/llama-server || $(cat "$DATA/llama/BUILD" 2>/dev/null) != "$LLAMA_BUILD" ]]; then
+  # A Vulkan driver (an ICD) and the loader; a software rasteriser (lavapipe) alone is slower than the CPU build.
+  variant=$arch
+  if ldconfig -p 2>/dev/null | grep -q 'libvulkan\.so\.1' &&
+    compgen -G '/usr/share/vulkan/icd.d/*.json' | grep -qv lvp; then
+    variant=vulkan-$arch
+  fi
+  # An install from before there were variants wrote only the build, and was vulkan-x64.
+  have=$(cat "$DATA/llama/BUILD" 2>/dev/null || true)
+  [[ $have == "$LLAMA_BUILD" ]] && have="$LLAMA_BUILD vulkan-x64"
+  if [[ ! -x $DATA/llama/llama-server || $have != "$LLAMA_BUILD $variant" ]]; then
     tmp=$(mktemp -d)
-    curl -fL --progress-bar -o "$tmp/llama.tgz" "$LLAMA_URL"
-    echo "$LLAMA_SHA  $tmp/llama.tgz" | sha256sum -c --quiet - || die "checksum mismatch for the llama.cpp download"
+    curl -fL --progress-bar -o "$tmp/llama.tgz" \
+      "https://github.com/ggml-org/llama.cpp/releases/download/$LLAMA_BUILD/llama-$LLAMA_BUILD-bin-ubuntu-$variant.tar.gz"
+    echo "${LLAMA_SHA[$variant]}  $tmp/llama.tgz" | sha256sum -c --quiet - || die "checksum mismatch for the llama.cpp download"
     tar xzf "$tmp/llama.tgz" -C "$tmp"
     rm -rf "$DATA/llama"
     mv "$tmp/llama-$LLAMA_BUILD" "$DATA/llama"
-    echo "$LLAMA_BUILD" >"$DATA/llama/BUILD"
+    echo "$LLAMA_BUILD $variant" >"$DATA/llama/BUILD"
     rm -rf "$tmp"
   fi
-  ok "have llama.cpp $LLAMA_BUILD"
+  ok "have llama.cpp $LLAMA_BUILD ($variant)"
   fetch "$MODEL_URL" "$DATA/models/$MODEL" "$MODEL_SHA"
 
   step "Mutter (Mandarin voice; the mind translates for it)"
@@ -160,7 +195,8 @@ fi
 
 step "Linking code into place"
 link "$REPO/bin/glitch" "$HOME/.local/bin/glitch"
-link "$REPO/plugin" "$CONFIG/omarchy/plugins/$PLUGIN_ID"
+# `omarchy plugin add` clones the repo to this path; any other checkout is linked there.
+[[ $REPO -ef $CONFIG/omarchy/plugins/$PLUGIN_ID ]] || link "$REPO" "$CONFIG/omarchy/plugins/$PLUGIN_ID"
 link "$REPO/hypr/glitch.lua" "$CONFIG/hypr/glitch.lua"
 mkdir -p "$CONFIG/glitch"
 if [[ ! -f $CONFIG/glitch/glitch.conf ]]; then
@@ -170,8 +206,9 @@ fi
 
 step "Orb shader"
 qsb_out="$REPO/plugin/glitch.frag.qsb"
-if [[ ! -s $qsb_out || $REPO/plugin/orb.glsl -nt $qsb_out ]]; then
-  # After a git pull, mtimes can make the committed glitch.frag.qsb look older than orb.glsl.
+# Only for an edited orb.glsl: a rebuild of the committed one would leave the checkout
+# changed, and `omarchy plugin update` pulls only into a clean one.
+if [[ ! -s $qsb_out ]] || ! git -C "$REPO" diff --quiet HEAD -- plugin/orb.glsl 2>/dev/null; then
   if "$REPO/plugin/build-shader"; then
     ok "compiled orb.glsl"
   elif [[ -s $qsb_out ]]; then
@@ -185,6 +222,16 @@ fi
 
 step "Keybindings"
 hypr="$CONFIG/hypr/hyprland.lua"
+# modmask: Shift 1, Alt 8, Super 64. Lua bindings show no command, so glitch's own are known by their description.
+taken=$(hyprctl binds -j 2>/dev/null | jq -r '.[] | select((.description // "") | test("glitch") | not)
+  | select(((.key | ascii_downcase) == "d" and (.modmask == 64 or .modmask == 72 or .modmask == 73))
+      or ((.key | ascii_downcase) == "backspace" and .modmask == 72))
+  | "\(.description // .dispatcher) (modmask \(.modmask), \(.key))"' || true)
+if [[ -n $taken ]]; then
+  echo "    warning: glitch's keys are already bound, and both bindings will fire:"
+  sed 's/^/      /' <<<"$taken"
+  echo "    change one of them (glitch's are in $REPO/hypr/glitch.lua)"
+fi
 if ! grep -q 'require("hypr.glitch")' "$hypr"; then
   cp "$hypr" "$hypr.bak.$(date +%s)"
   printf '\n-- glitch voice companion (%s)\nrequire("hypr.glitch")\n' "$REPO" >>"$hypr"
@@ -203,20 +250,31 @@ if ((with_mind)); then
   systemctl --user daemon-reload
   systemctl --user enable glitch-mind.service >/dev/null 2>&1
   systemctl --user restart glitch-mind.service
-  for _ in $(seq 1 30); do curl -fs localhost:8765/health >/dev/null 2>&1 && break; sleep 1; done
-  curl -fs localhost:8765/health >/dev/null 2>&1 && ok "glitch-mind is up on :8765" || echo "    warning: glitch-mind isn't answering yet (journalctl --user -u glitch-mind)"
+  mind_port=$(conf MIND_PORT)
+  for _ in $(seq 1 30); do curl -fs "localhost:$mind_port/health" >/dev/null 2>&1 && break; sleep 1; done
+  curl -fs "localhost:$mind_port/health" >/dev/null 2>&1 && ok "glitch-mind is up on :$mind_port" || echo "    warning: glitch-mind isn't answering yet (journalctl --user -u glitch-mind)"
 fi
 
-if ((with_remote)); then
-  step "Remote control (sessions from the Claude app)"
+step "Remote control (sessions from the Claude app)"
+workdir=$(conf WORKDIR)
+if [[ $(conf REMOTE) != 1 ]]; then
+  systemctl --user disable --now glitch-remote-reap.timer >/dev/null 2>&1 || true
+  if systemctl --user is-active --quiet glitch-remote.service; then
+    echo "    note: glitch-remote is still running; stop it with: systemctl --user disable --now glitch-remote"
+  else
+    systemctl --user disable glitch-remote.service >/dev/null 2>&1 || true
+  fi
+  ok "off (to list this machine in the Claude app: REMOTE=1 in ~/.config/glitch/glitch.conf, then re-run ./install.sh)"
+else
+  ok "sessions started from the app run in ${workdir/#$HOME/~} with permission mode $(conf REMOTE_PERMISSION_MODE)"
   for u in glitch-remote.service glitch-remote-reap.service glitch-remote-reap.timer; do
     link "$REPO/systemd/$u" "$CONFIG/systemd/user/$u"
   done
   systemctl --user daemon-reload
   # The service has no TTY for Claude's one-time "Enable Remote Control?"
   # (remoteDialogSeen, undocumented: re-check when Claude changes) or the trust
-  # prompt for ~/Work; without both, the server exits and restarts every 30 s.
-  if [[ -d $HOME/Work ]] && jq -e --arg dir "$HOME/Work" '.remoteDialogSeen and .projects[$dir].hasTrustDialogAccepted' \
+  # prompt for WORKDIR; without both, the server exits and restarts every 30 s.
+  if [[ -d $workdir ]] && jq -e --arg dir "$workdir" '.remoteDialogSeen and .projects[$dir].hasTrustDialogAccepted' \
     "$HOME/.claude.json" >/dev/null 2>&1; then
     # Start only a stopped server: a restart would cut off its sessions mid-turn.
     systemctl --user enable glitch-remote.service glitch-remote-reap.timer >/dev/null 2>&1 || true
@@ -231,7 +289,7 @@ if ((with_remote)); then
       echo "    warning: glitch-remote isn't running (journalctl --user -u glitch-remote)"
     fi
   else
-    echo "    one-time setup: run  cd ~/Work && claude remote-control"
+    echo "    one-time setup: run  mkdir -p ${workdir/#$HOME/~} && cd ${workdir/#$HOME/~} && claude remote-control"
     echo "    answer y and trust the folder, Ctrl+C once it's up, then re-run ./install.sh"
   fi
 fi
@@ -239,59 +297,13 @@ fi
 step "Phone portal"
 link "$REPO/systemd/glitch-portal.service" "$CONFIG/systemd/user/glitch-portal.service"
 systemctl --user daemon-reload
-{ read -r p_addr; read -r p_port; read -r p_cert; read -r p_key; } < <(
-  set +u
-  {
-    . "$REPO/config/glitch.conf"
-    [[ -f $CONFIG/glitch/glitch.conf ]] && . "$CONFIG/glitch/glitch.conf"
-  } >/dev/null
-  printf '%s\n' "$PORTAL_ADDR" "$PORTAL_PORT" "$PORTAL_CERT" "$PORTAL_KEY"
-)
-if [[ -z $p_addr ]]; then
-  ok "off (to use it: set PORTAL_ADDR in ~/.config/glitch/glitch.conf, run glitch cert, install its CA file on the phone, re-run ./install.sh)"
-elif [[ ! -f $DATA/portal/glitch-ca.crt || ! -f $p_cert || ! -f $p_key ]]; then
-  ok "off until there's a certificate: run glitch cert, install its CA file on the phone, re-run ./install.sh"
-else
-  systemctl --user enable glitch-portal.service >/dev/null 2>&1 || true
-  # Safe mid-turn: KillMode=process leaves a running phone turn alone.
+# Once `glitch phone` has turned it on, an update restarts it onto the new code.
+# Safe mid-turn: KillMode=process leaves a running phone turn alone.
+if systemctl --user is-enabled --quiet glitch-portal.service 2>/dev/null; then
   systemctl --user restart glitch-portal.service >/dev/null 2>&1 || true
   sleep 2
-  if systemctl --user is-active --quiet glitch-portal.service; then
-    ok "https://$p_addr:$p_port (pair a phone: glitch pair)"
-  else
-    echo "    warning: glitch-portal isn't running (journalctl --user -u glitch-portal)"
-  fi
-  todo=()
-  lan=$(ip -j -4 addr show 2>/dev/null | jq -r --arg a "$p_addr" \
-    '.[] | select(.ifname != "tailscale0") | .addr_info[] | select(.local == $a) | .prefixlen' | head -1)
-  if [[ -z $lan ]]; then
-    echo "    warning: $p_addr (PORTAL_ADDR) isn't an address of this machine (ip -4 addr)"
-  elif command -v ufw >/dev/null; then
-    IFS=. read -r a b c d <<<"$p_addr"
-    n=$(((a << 24 | b << 16 | c << 8 | d) & (0xffffffff << (32 - lan)) & 0xffffffff))
-    lan="$((n >> 24)).$((n >> 16 & 255)).$((n >> 8 & 255)).$((n & 255))/$lan"
-    # ufw saves each rule in user.rules as "### tuple ### allow tcp <port> <dst> any <src> in[_<iface>]".
-    rules=$(cat /etc/ufw/user.rules 2>/dev/null)
-    grep -q "^### tuple ### allow tcp $p_port 0\.0\.0\.0/0 any ${lan//./\\.} in\b" <<<"$rules" ||
-      todo+=("sudo ufw allow from $lan to any port $p_port proto tcp comment 'glitch portal LAN'")
-    grep -q "^### tuple ### allow tcp $p_port 0\.0\.0\.0/0 any 0\.0\.0\.0/0 in_tailscale0\b" <<<"$rules" ||
-      todo+=("sudo ufw allow in on tailscale0 to any port $p_port proto tcp comment 'glitch portal Tailscale'")
-  fi
-  if command -v tailscale >/dev/null; then
-    # --advertise-routes replaces the whole list, so repeat the routes already advertised.
-    prefs=$(tailscale debug prefs 2>/dev/null) || prefs='{"AdvertiseRoutes":["<routes it already advertises>"]}'
-    routes=$(jq -r --arg r "$p_addr/32" '.AdvertiseRoutes // [] | if index([$r]) then "" else . + [$r] | join(",") end' <<<"$prefs")
-    ts="sudo "
-    [[ $(jq -r '.OperatorUser // ""' <<<"$prefs") == "$(id -un)" ]] && ts=
-    [[ -n $routes ]] && todo+=("${ts}tailscale set --advertise-routes=$routes")
-  fi
-  if ((${#todo[@]})); then
-    echo "    to reach it from the phone, run:"
-    printf '      %s\n' "${todo[@]}"
-    [[ ${todo[*]} == *advertise-routes* ]] &&
-      echo "    then approve the $p_addr/32 route in the Tailscale admin console (Machines) and turn on Use Tailscale subnets in the phone's Tailscale app"
-  fi
 fi
+"$REPO/bin/glitch" phone --status | sed 's/^/    /'
 
 if ((with_desktop)); then
   step "Desktop control (screenshots, windows, clicks and keys for agents)"
@@ -308,6 +320,7 @@ if ((with_desktop)); then
   systemctl --user enable --now ydotool.service >/dev/null 2>&1 || true
   # Every Claude session (voice, phone, terminal) loads ~/.claude/rules.
   link "$REPO/config/desktop.md" "$HOME/.claude/rules/glitch-desktop.md"
+  ok "every Claude session on this machine now reads those desktop instructions (--no-desktop leaves them out)"
   for _ in 1 2 3 4 5; do ydotool mousemove -x 0 -y 0 >/dev/null 2>&1 && break; sleep 0.5; done
   ydotool mousemove -x 0 -y 0 >/dev/null 2>&1 && ok "ydotool works" || echo "    warning: ydotool can't reach /dev/uinput (journalctl --user -u ydotool)"
 fi

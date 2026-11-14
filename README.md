@@ -33,18 +33,34 @@ An empty `MUTTER_VOICE` turns it off.
 ## Install
 
 ```bash
-git clone git@github.com:dragland/glitch.git ~/glitch
-~/glitch/install.sh
+omarchy plugin add https://github.com/dragland/glitch.git
+~/.config/omarchy/plugins/dragland.glitch/install.sh
 ```
 
-Needs Omarchy 4 with voxtype dictation (`omarchy-voxtype-install`) and Claude
-Code or Codex. Root once, for desktop control (`--no-desktop` skips it).
-Downloads (~1.5 GB, pinned in install.sh) go to `~/.local/share/glitch`;
-`--no-mind` skips the local model.
+The first line adds the orb to the Omarchy shell; the second installs the rest
+and turns it on. A clone anywhere else works the same way: run its `install.sh`.
 
-Update with `git pull && ./install.sh`; remove with `./uninstall.sh`
-(`--purge` also deletes downloads and settings). It leaves the root part of
-desktop control: `sudo pacman -R ydotool && sudo rm
+Needs Omarchy 4 with voxtype dictation (`omarchy install dictation voxtype`)
+and Claude Code or Codex. What install.sh does to the machine:
+
+- Downloads ~1.5 GB (pinned and checksummed in install.sh) to
+  `~/.local/share/glitch`: Piper voices and a small local model that picks the
+  orb's reactions. It runs on the GPU through Vulkan where there is a driver and
+  on the CPU otherwise; `--no-mind` skips it.
+- Binds the keys below with one `require` line in `~/.config/hypr/hyprland.lua`.
+- Asks for root once, for desktop control: it installs ydotool and gives your
+  login session `/dev/uinput`, and it adds [config/desktop.md](config/desktop.md)
+  to `~/.claude/rules`, which every Claude session on the machine reads.
+  `--no-desktop` skips all of it.
+- Raises voxtype's recording cap to 10 minutes (`--no-voxtype` skips it; then
+  set `RECORD_LIMIT` to voxtype's own cap).
+
+Remote control and the phone portal stay off until you turn them on (below).
+
+Update with `omarchy plugin update dragland.glitch` (or `git pull`), then
+`./install.sh` again. Remove with `./uninstall.sh` (`--purge` also deletes
+downloads and settings), then `omarchy plugin remove dragland.glitch`. That
+leaves the root part of desktop control: `sudo pacman -R ydotool && sudo rm
 /etc/udev/rules.d/70-uinput.rules /etc/modules-load.d/uinput.conf` removes it.
 
 ## Use
@@ -73,15 +89,19 @@ with grim, hyprctl, ydotool and wtype.
 
 ### From the Claude app
 
-While you're logged in, `glitch-remote` (Claude Code's remote control) lists
-this machine in the Claude app and at claude.ai/code. Sessions you or your
-claude.ai projects start there run in `~/Work` with `bypassPermissions` and
-Claude in Chrome (`systemctl --user edit glitch-remote` changes that).
-Glitch's own voice turns (`claude -p`) don't appear there.
+Off by default. With `REMOTE=1` in `~/.config/glitch/glitch.conf` and a re-run
+of `./install.sh`, `glitch-remote` (Claude Code's remote control) lists this
+machine in the Claude app and at claude.ai/code while you're logged in.
+Sessions you or your claude.ai projects start there run in `WORKDIR` (`~/Work`)
+with Claude in Chrome, in the permission mode `REMOTE_PERMISSION_MODE` names:
+`auto` by default, where Claude judges each action itself, with nobody at the
+desk to ask. `bypassPermissions` skips every check, so set it only if anyone
+who can reach your claude.ai account may do anything on this machine. Restart
+`glitch-remote` after changing the mode. Glitch's own voice turns (`claude -p`)
+don't appear there.
 
-- The first install asks you to run `claude remote-control` once in `~/Work`
-  to accept its prompts. `./install.sh --no-remote` leaves remote control out
-  entirely.
+- The first install asks you to run `claude remote-control` once in `WORKDIR`
+  to accept its prompts.
 - After an hour with no Claude activity (`REMOTE_IDLE_MIN`), the server
   restarts to free its sessions. The next message brings a session back with
   its context.
@@ -93,15 +113,14 @@ Glitch's own voice turns (`claude -p`) don't appear there.
 A page with its own orb that the phone opens over HTTPS, at home or through
 Tailscale. It talks to the same conversation as Super+D, and a turn asked from
 the phone answers only on the phone. It runs while you're logged in at the desk.
+Off by default, and so far tried only on Android with Chrome.
 
-1. Reserve this machine's address in your router (a DHCP reservation), since the certificate and the paired app are tied to it, and set `PORTAL_ADDR=<that address>` in `~/.config/glitch/glitch.conf`.
-2. Run `glitch cert`.
-3. Copy `~/.local/share/glitch/portal/glitch-ca.crt` to the phone and install it in Settings > Security > Encryption & credentials > Install a certificate > CA certificate. Check that its fingerprint matches the one `glitch cert` printed. `glitch cert` destroys the CA's key, so it can't vouch for anything else.
-4. Re-run `./install.sh`. It starts the portal and prints its address and the firewall and Tailscale commands left for you to run.
-5. Open that address on the phone, say "pair my phone" at the desk (or run `glitch pair`), and type the code it speaks.
-6. Install it to the home screen.
+1. Run `glitch phone`. It picks this machine's LAN address (reserve it in your router, a DHCP reservation, since the certificate and the paired app are tied to it), makes a certificate, starts the server, and prints the firewall and Tailscale commands left for you to run, then a QR code.
+2. Scan the code on the phone, on the same Wi-Fi. Chrome warns that the connection isn't private, because the phone doesn't trust the certificate yet: choose Advanced, then Proceed. The page shows the certificate's fingerprint (check it against the one `glitch phone` printed), hands over the certificate, and walks through installing it in Settings. The certificate vouches only for that one address, and `glitch cert` destroys the key that signed it.
+3. Open glitch from that page, say "pair my phone" at the desk (or run `glitch pair`), and type the code it speaks.
+4. Install it to the home screen.
 
-If the address changes, run `glitch cert --renew` and install the new CA file on the phone. After a new address or `PORTAL_PORT`, re-run `./install.sh`, add the app to the home screen again and pair it again. `glitch unpair` forgets every phone.
+If the address changes, set the new `PORTAL_ADDR` in `~/.config/glitch/glitch.conf`, run `glitch cert --renew` and `glitch phone`, and install the new certificate on the phone. After a new address or `PORTAL_PORT`, add the app to the home screen again and pair it again. `glitch unpair` forgets every phone.
 
 - Hold the orb to talk and let go to send. Slide off it to throw the recording away, and tap while glitch speaks to quiet it. The reply is typed out as it is spoken, with the full text below.
 - While a phone turn works, the page shows the agent's latest thought or working note under the status line. A muttered thought shows its Mandarin, with pinyin above each character, as it is spoken, and its English once it has been. The desk shows no text.
@@ -135,17 +154,15 @@ Super+D ─► voxtype (local Whisper) ─► transcript ─► agent, headless,
   `local`, `jev` or `openai`), `mandarin` (translates a thought for the mutter), `preview`
   (cycles orb styles while you tune `reactions.json`), `desktop-root` (desktop
   control's root half), `portal` (the phone portal's HTTPS server).
+- `manifest.json`: what makes the repo an Omarchy shell plugin.
 - `config/`: defaults, including the SAY/MOOD convention in `voice-prompt.md`.
 
-install.sh symlinks the code into place, adds one `require` line to
-`~/.config/hypr/hyprland.lua`, installs ydotool with access to `/dev/uinput`
-(as root), and raises voxtype's recording cap (skip that with `--no-voxtype`,
-then set `RECORD_LIMIT` to voxtype's own cap). To work on glitch itself, read
-AGENTS.md.
+To work on glitch itself, read AGENTS.md.
 
 ## Credits
 
 The creature's patterns, palettes, motions and beep synth come from Beep Jev
 by Yohei Nakajima (ported from the public app's bundle); the decision approach
-follows his [glance](https://github.com/yoheinakajima/glance) and TypeSafe's Jev. This repo
-is private; check with him before publishing it.
+follows his [glance](https://github.com/yoheinakajima/glance) and TypeSafe's Jev.
+
+MIT licensed; see [LICENSE](LICENSE).
