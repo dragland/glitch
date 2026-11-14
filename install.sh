@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Install (or update) glitch on an Omarchy machine. Safe to re-run: it links
-# this checkout into place, so `git pull && ./install.sh` is an update.
+# Install glitch on an Omarchy machine. Safe to re-run, which is also how an
+# update is applied.
 #
 #   ./install.sh                 everything
 #   ./install.sh --no-mind       skip the local decision model (orb uses reactions.json)

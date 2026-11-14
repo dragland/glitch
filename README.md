@@ -1,10 +1,10 @@
 # glitch
 
 A voice-first companion for [Omarchy](https://omarchy.org). Tap **Super+D**,
-talk, tap again: your coding agent (Claude Code or Codex, whichever is Omarchy's
-default) does it headless, while a little creature at the bottom of the screen
-shows what it's doing, beeps its mood and speaks a one-line answer. The full
-reply waits on a sticky card; click it to open the conversation.
+talk, tap again, and your coding agent (Claude Code or Codex, whichever is
+Omarchy's default) does it headless. A little creature at the bottom of the
+screen shows what it's doing, beeps its mood and speaks a one-line answer. The
+full reply waits on a card; click it to open the conversation.
 
 The creature grew out of Yohei Nakajima's [Beep Jev](https://beepjev.replit.app):
 its patterns, palettes, motions and beep synth. A decision model (local by
@@ -134,11 +134,11 @@ So far tried only on Android with Chrome.
 
 If the address changes, set the new `PORTAL_ADDR` in `~/.config/glitch/glitch.conf`, run `glitch cert --renew` and `glitch phone`, and install the new certificate on the phone. After a new address or `PORTAL_PORT`, add the app to the home screen again and pair it again. `glitch unpair` forgets every phone.
 
-- Hold the orb to talk and let go to send. Slide off it to throw the recording away, and tap while glitch speaks to quiet it. The reply is typed out as it is spoken, with the full text below.
-- While a phone turn works, the page shows the agent's latest thought or working note under the status line. A muttered thought shows its Mandarin, with pinyin above each character, as it is spoken, and its English once it has been. The desk shows no text.
-- When a phone turn needs your permission, the page shows everything the tool would get (the whole command, a file's full new content, every field of any other tool) with Allow once and Deny. It waits up to 5 minutes, and desk requests queue behind it. If the page isn't open, a notification asks instead: Deny answers at once, a short one-line shell command can be allowed from it after unlock, and anything else opens the full card. Root prompts (pkexec) appear only at the desk.
-- Stop ends the running turn, whichever side started it. "new chat, …" starts fresh as at the desk and clears the page. The page also clears 15 minutes after the last turn, once it is off screen and the reply has been heard.
-- Away from home the page offers an Open Tailscale button. If you allow notifications, the phone tells you when glitch needs you or finished a reply you didn't hear.
+- Hold the orb to talk and let go to send. Slide off it to discard the recording, and tap while glitch speaks to quiet it.
+- While a turn works, the page shows the agent's latest thought. With the mutter on, it shows the Mandarin, with pinyin above each character, as it is spoken.
+- When a turn needs your permission, the page shows the tool's whole input with Allow once and Deny, and waits up to 5 minutes. If the page isn't open, a notification asks instead. Root prompts (pkexec) appear only at the desk.
+- Stop ends the running turn, whichever side started it, and "new chat, …" starts fresh.
+- Away from home the page offers an Open Tailscale button. With notifications allowed, the phone tells you when glitch needs you or finished a reply you didn't hear.
 
 Settings and their defaults are in [config/glitch.conf](config/glitch.conf);
 override them in `~/.config/glitch/glitch.conf`. Your own `reactions.json` there
