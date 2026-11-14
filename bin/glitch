@@ -254,7 +254,7 @@ chime() {
 
 speech_warm() {
   SPEAK_SLOT="$RT/${1:-say}"
-  rm -f "$SPEAK_SLOT.wav" "$SPEAK_SLOT.env" "$SPEAK_SLOT.fifo"
+  rm -f "$SPEAK_SLOT.wav" "$SPEAK_SLOT.env" "$SPEAK_SLOT.ruby" "$SPEAK_SLOT.fifo"
   [[ $SPEAK == 1 && -x $PY && -f $VOICE ]] || return 0
   mkfifo "$SPEAK_SLOT.fifo" || return 0
   "$PY" -I "$SPEAK_HELPER" "$VOICE" "$SPEAK_SLOT.fifo" "$SPEAK_SLOT.wav" </dev/null >/dev/null 2>>"$RT/glitch.log" 8>&- 9>&- &
@@ -441,6 +441,9 @@ mutter_once() {
   VOICE=$MUTTER_VOICE speech_warm mutter
   speech_render "$zh"
   [[ -s $RT/mutter.wav && -e $RT/turn.pid ]] && ! recording || return 0
+  # The voice's own readings, when it left them, replace libexec/mandarin's.
+  [[ -s $RT/mutter.ruby ]] && out=$(jq -c --slurpfile r "$RT/mutter.ruby" '.ruby = $r[0]
+    | .pinyin = ([.ruby[] | if .[1] != "" then .[1] else .[0] | gsub("\\s"; "") end | select(. != "")] | join(" "))' <<<"$out" || echo "$out")
   if [[ $PORTAL == phone ]]; then
     id="${EPOCHREALTIME/./}-mutter.wav"
     cp "$RT/mutter.wav" "$PH/clips/$id" || return 0
