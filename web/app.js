@@ -230,10 +230,22 @@ function traced(list) {
   if (!rows.length) tracedRows.clear()
   traceEl.replaceChildren(...rows.flatMap(t => t.kind !== "zh" ? [row(t, t.text, t.kind)]
     : t.heard === "done" && !t.zh ? [row(t, t.text, "think")]
-    : [Object.assign(row(t, t.zh, "zh"), { lang: "zh-Hans" }), ...t.pinyin ? [row(t, t.pinyin, "py")] : [],
+    : [hanzi(t, row(t, t.ruby?.length ? "" : t.zh, "zh")), ...t.pinyin && !t.ruby?.length ? [row(t, t.pinyin, "py")] : [],
        ...t.heard === "done" ? [row(t, t.text, "en")] : []]))
 }
 const tracedRows = new Set()
+
+// Pinyin sits above each character, as in a reader.
+function hanzi(t, p) {
+  p.lang = "zh-Hans"
+  for (const [text, py] of t.ruby || []) {
+    if (!py) { p.append(text); continue }
+    const r = make("ruby", text)
+    r.append(make("rt", py))
+    p.append(r)
+  }
+  return p
+}
 
 let traceN = 0
 const traceIn = (t, restored) => ({ ...t, n: ++traceN, heard: restored && t.kind === "zh" ? "done" : "" })

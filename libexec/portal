@@ -42,11 +42,12 @@ Events. Each carries its "type". bin/glitch writes all but `turn` and `hello`.
   reply    {summary, body, speech}  summary: the spoken line, the one that would be spoken,
            or ""; body: the full reply or the error, up to 4000 characters; speech: whether
            a say clip follows
-  trace    {kind, text, zh, pinyin, clip}  what the agent is doing, for the page to list
+  trace    {kind, text, zh, pinyin, ruby, clip}  what the agent is doing, for the page to list
            during a turn. kind think: one of its thoughts (a summary of its reasoning);
            note: a message it wrote before a tool call; zh: a thought being muttered in
-           Mandarin, where text is the English, zh and pinyin the line, and clip the id of
-           its mutter clip. text is at most 800 characters. A `heard`, a `fresh` or a
+           Mandarin, where text is the English, zh and pinyin the line, ruby the line as
+           [text, pinyin] pairs (one per character, "" for no reading) and clip the id
+           of its mutter clip. text is at most 800 characters. A `heard`, a `fresh` or a
            "turn" signal ends the list; this server keeps the last TRACE_KEPT for hello.
   approve  {id, ask, label, short, cut, oneline, timeout, left}
            ask: the question to show.

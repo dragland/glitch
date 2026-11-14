@@ -444,7 +444,7 @@ mutter_once() {
   if [[ $PORTAL == phone ]]; then
     id="${EPOCHREALTIME/./}-mutter.wav"
     cp "$RT/mutter.wav" "$PH/clips/$id" || return 0
-    phone_send "$(jq -c --arg id "$id" --argjson all "$1" "$TRACE_JQ"'{type:"trace", kind:"zh", text:($all | shown), zh, pinyin, clip:$id}' <<<"$out")" || return 0
+    phone_send "$(jq -c --arg id "$id" --argjson all "$1" "$TRACE_JQ"'{type:"trace", kind:"zh", text:($all | shown), zh, pinyin, ruby, clip:$id}' <<<"$out")" || return 0
     MUTTERED=1
     clip_sent mutter "$id" "$(cat "$RT/mutter.env" 2>/dev/null)"
     sleep $(((CLIP_MS + 999) / 1000))
