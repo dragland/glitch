@@ -2,6 +2,10 @@
 
 Voice companion for [Omarchy](https://omarchy.org). Tap a key, talk, and an orb shows your coding agent at work.
 
+<div align="center">
+  <img src="docs/orb.webp" width="360" alt="The orb listening, working, and speaking in each of its moods" />
+</div>
+
 ## How it works
 
 - Tap **Super+D**, talk, tap again
