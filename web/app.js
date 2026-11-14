@@ -11,7 +11,7 @@ const TAP_MS = 250, HANDOFF_MS = 30000, RELOAD_MS = 30000, ARM_MS = 400, UNHEARD
 const WORK = new Set(["thinking", "tool"])
 const ORB_Y_OF_HEIGHT = 0.33, ORB_RADIUS_STAGE_PX = 135, TALK_RADII = 1.5, DISCARD_RADII = 2
 const HEARD_S_PER_WORD = 0.025, SPOKEN_LEAD_S = 0.05, VOICED_LEVEL = 8, VOICE_GAP_S = 0.12, PAUSE_SNAP_S = 0.6
-const TRACE_SHOWN = 3
+const TRACE_SHOWN = 1
 const BUZZ = { start: 12, sent: [12, 70, 12], ask: [40, 80, 40, 80, 40], failed: [180] }
 
 let installer = null, booted = false, persisted = false
@@ -793,6 +793,7 @@ function mic() {
   }).finally(() => { asking = null })
 }
 
+// A held stream keeps a Bluetooth headset's voice link, and its mic, from every other device.
 function dropMic() {
   stream?.getTracks().forEach(t => t.stop())
   source?.disconnect()
@@ -813,7 +814,7 @@ function begin(p) {
 
 function record(p) {
   mic().then(s => {
-    if (press !== p) return
+    if (press !== p) { if (!press) dropMic(); return }
     const type = ["audio/webm;codecs=opus", "audio/ogg;codecs=opus", "audio/mp4"].find(t => MediaRecorder.isTypeSupported(t))
     p.rec = new MediaRecorder(s, type ? { mimeType: type } : undefined)
     p.chunks = []
@@ -867,6 +868,7 @@ function release(e, cancel = false) {
   if (cancel) p.discard = true
   if (p.discard || performance.now() - p.t < TAP_MS || !rec) {
     rec?.stop()
+    dropMic()
     if (p.discard && p.begun && !document.hidden) chime("unsure")
     if (p.begun) { local = null; cleared = false; if (!p.discard && turn !== "desk") note ||= "hold to talk"; show() }
     return
@@ -877,6 +879,7 @@ function release(e, cancel = false) {
   show()
   rec.onstop = () => send(new Blob(p.chunks, { type: rec.mimeType }))
   rec.stop()
+  dropMic()
 }
 canvas.addEventListener("pointerup", e => release(e))
 canvas.addEventListener("pointercancel", e => release(e, true))
