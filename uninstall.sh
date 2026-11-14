@@ -49,7 +49,7 @@ done
 systemctl --user daemon-reload
 
 if [[ ${1:-} == --purge ]]; then
-  rm -rf "$DATA" "$CONFIG/glitch"
+  rm -rf "$DATA" "$CONFIG/glitch" "${XDG_STATE_HOME:-$HOME/.local/state}/glitch"
   echo "    deleted ~/.local/share/glitch and ~/.config/glitch"
 fi
 echo "==> Done (voxtype settings, the ydotool package and its /etc/udev and /etc/modules-load.d files were left as they are)"
