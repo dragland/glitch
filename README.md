@@ -3,7 +3,7 @@
 Voice companion for [Omarchy](https://omarchy.org). Tap a key, talk, and an orb shows your coding agent at work.
 
 <div align="center">
-  <img src="docs/orb.webp" width="360" alt="The orb waking up, saying hello, listening, working, and showing a few moods" />
+  <img src="docs/orb.webp" width="360" alt="The orb waking up, saying hello, listening, working and reporting back" />
 </div>
 
 ## How it works
