@@ -202,6 +202,16 @@ current_sid() {
 forget_session() {
   rm -f "$RT/sid" "$RT/sid.agent" "$RT/history.jsonl"
   close_card
+  phone_fresh
+}
+
+phone_fresh() {
+  [[ -d $PH ]] && phone_send "{\"type\":\"fresh\"${1:+,\"idle\":true}}"
+}
+
+cmd_expire() {
+  close_card
+  [[ -n $(turn_portal) ]] || phone_fresh idle
 }
 
 reactions() {
@@ -734,6 +744,7 @@ cmd_turn() {
     [[ -n ${SPEAK_PID:-} ]] && kill "$SPEAK_PID" 2>/dev/null
     rm -f "$RT/say.fifo"
     log "turn cancelled"
+    expire_later
     exit 0
   fi
   if [[ $replied == false ]]; then
@@ -1126,7 +1137,7 @@ unpair) cmd_unpair ;;
 portal) cmd_portal ;;
 cert) cmd_cert "${2:-}" ;;
 _live) cmd_live ;;
-_expire) close_card ;;
+_expire) cmd_expire ;;
 _approve) cmd_approve ;;
 _reap) cmd_reap ;;
 open) cmd_open ;;
