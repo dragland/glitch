@@ -28,7 +28,6 @@ DATA="${XDG_DATA_HOME:-$HOME/.local/share}/glitch"
 USER_CONF="${XDG_CONFIG_HOME:-$HOME/.config}/glitch"
 RT="${XDG_RUNTIME_DIR:-/run/user/$UID}/glitch"
 mkdir -p "$RT"
-# A scratch runtime keeps its card's record to itself.
 CARD="$RT/card"
 [[ $RT == "/run/user/$UID/glitch" ]] && CARD="${XDG_STATE_HOME:-$HOME/.local/state}/glitch/card"
 
@@ -48,8 +47,8 @@ CUE="$GLITCH_HOME/libexec/cue"
 DECIDE="$GLITCH_HOME/libexec/decide"
 SPEAK_HELPER="$GLITCH_HOME/libexec/speak"
 
-# Every detached child closes fds 8 (key.lock) and 9 (turn.lock): an inherited
-# fd keeps the flock held after its owner exits.
+# Every detached child closes fds 8 (key.lock) and 9 (turn.lock), and the mutter's
+# children close 6 (mutter.lock): an inherited fd keeps the flock held after its owner exits.
 
 if [[ -f $RT/glitch.log ]] && (($(wc -l <"$RT/glitch.log") > 2000)); then
   tail -n 1000 "$RT/glitch.log" >"$RT/glitch.log.tmp" && mv "$RT/glitch.log.tmp" "$RT/glitch.log"
@@ -325,9 +324,6 @@ notify() {
   mkdir -p "${CARD%/*}" && printf '%s' "${1//$'\n'/ }" >"$CARD"
 }
 
-# The card is critical, so the shell never times it out and restores it after a
-# restart, while a reboot or logout empties $RT and kills expire_later's timer. $CARD
-# (the card's summary) outlives both, and goes only once the shell has answered.
 close_card() {
   local summary answer
   summary=$(cat "$CARD" 2>/dev/null) || return 0
@@ -401,13 +397,11 @@ stop_live() {
 
 # --- the trace and the mutter ----------------------------------------------------------
 
-# shown: a thought or a note as the phone lists it. The cut comes first: the patterns
-# are quadratic in a long run of spaces.
+# These patterns backtrack quadratically over a long run of spaces, so the cut comes first.
 # shellcheck disable=SC2016 # jq, not bash
 TRACE_JQ='def shown: tostring | .[0:4000] | [splits("\n") | select(test("^\\s*(SAY|MOOD):") | not)] | join("\n")
   | gsub("\\*\\*|`"; "") | gsub("\\s*\n\\s*"; "\n") | sub("^\\s+"; "") | sub("\\s+$"; "") | clip(400);'
 
-# trace KIND JSON-STRING
 trace() {
   [[ $PORTAL == phone ]] || return 0
   phone_send "$(jq -c --arg k "$1" "$JQ_DEFS$TRACE_JQ"'{type:"trace", kind:$k, text:shown} | select(.text != "")' <<<"$2" 2>/dev/null)"
@@ -417,7 +411,6 @@ working() {
   [[ -e $RT/turn.pid ]] && ! recording && [[ $(jq -r .state "$(state_file)" 2>/dev/null) =~ ^(thinking|tool)$ ]]
 }
 
-# mutter THOUGHT-JSON. Fails when it leaves the thought to the caller.
 mutter() {
   [[ $SPEAK == 1 && -x $PY && -n $MUTTER_VOICE && -f $MUTTER_VOICE ]] || return 1
   ((EPOCHSECONDS - LAST_MUTTER >= MUTTER_EVERY)) && working || return 1
@@ -426,14 +419,13 @@ mutter() {
   "$0" _mutter <<<"$1" >/dev/null 2>>"$RT/glitch.log" 8>&- 9>&- &
 }
 
-# Not setsid: cancel ends the turn's whole session, and this with it. The thought
-# comes on stdin, since one argument holds 128 KiB at most.
+# The thought comes on stdin: Linux caps one argument at 128 KiB.
 cmd_mutter() {
   THOUGHT=$(cat)
   exec 6>"$RT/mutter.lock"
   if flock -n 6; then
     echo $$ >"$RT/mutter.pid"
-    # stop_mutter ends this with TERM, and bash runs the trap once the child it waits on is gone.
+    # bash runs a trap only once the child it is waiting on has gone.
     trap 'trace think "$THOUGHT"; exit 0' TERM
     mutter_once && return 0
     trap - TERM
@@ -441,7 +433,6 @@ cmd_mutter() {
   trace think "$THOUGHT"
 }
 
-# Children close fd 6, or one that outlives a stop would keep mutter.lock.
 mutter_once() {
   local zh id event rest ruby
   jq -r . <<<"$THOUGHT" | "$PY" -I "$GLITCH_HOME/libexec/mandarin" >"$RT/mutter.json" 2>>"$RT/glitch.log" 6>&-
@@ -469,17 +460,14 @@ mutter_once() {
   fi
 }
 
-# One kill can miss a mutter that is just starting, so mutter_once also asks `working`
-# before it plays. The phone page drops its own mutter clip.
 stop_mutter() {
-  local pid kids playing=""
+  local pid kids=() playing=""
   pid=$(cat "$RT/mutter.pid" 2>/dev/null) || return 0
   rm -f "$RT/mutter.pid"
   grep -qs _mutter "/proc/$pid/cmdline" || return 0
   pgrep -P "$pid" -x pw-play >/dev/null && playing=1
-  kids=$(pgrep -P "$pid")
-  # shellcheck disable=SC2086 # one pid per word
-  kill "$pid" $kids 2>/dev/null
+  mapfile -t kids < <(pgrep -P "$pid")
+  kill "$pid" "${kids[@]}" 2>/dev/null
   [[ -n $playing ]] && PORTAL=desk ev hush
 }
 
@@ -510,8 +498,8 @@ adapter_claude() {
     --append-system-prompt "$(voice_prompt)")
   [[ -n $sid ]] && args+=(--resume "$sid")
   # stream-json requires --verbose. SIGINT ends a turn cleanly (SIGTERM leaves
-  # it unrecorded). -p hides thinking unless --thinking-display asks for its summaries
-  # (a flag that `claude --help` doesn't list: re-check it when Claude changes).
+  # it unrecorded). -p hides thinking unless --thinking-display asks for its summaries.
+  # `claude --help` doesn't list that flag, so re-check it when Claude changes.
   timeout --signal=INT --kill-after=15 "$TURN_TIMEOUT" claude "${args[@]}" 2>>"$RT/glitch.log" 9>&- |
     jq --unbuffered -rR "$JQ_DEFS"'fromjson? // empty |
     def tlabel: .name + (
@@ -842,7 +830,6 @@ cmd_turn() {
       fi
       ;;
     think) mutter "$rest" || trace think "$rest" ;;
-    # A message is a working note unless it is the last one, which is the reply.
     note)
       [[ -n $note ]] && trace note "$note"
       note=$rest

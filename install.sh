@@ -34,9 +34,9 @@ MUTTER=zh_CN-xiao_ya-medium
 MUTTER_URL="https://huggingface.co/rhasspy/piper-voices/resolve/c10ece1aade47bb51c153c893d14e5bf8e5b7117/zh/zh_CN/xiao_ya/medium/$MUTTER"
 MUTTER_SHA=cb2ce4ca1f5a36a7b23ae48f0651ce2c854c331ef7a804e5c5dc643d0f74f0e2
 MUTTER_JSON_SHA=e1ec027b7065959643c1463705398d413ed4fdaa626d7d8ef1d12ab87e9a0320
-# g2pW picks each character's reading for the Mandarin voice. Piper loads its config.py
-# as code, and takes from it the name of a tokenizer that transformers would fetch from
-# huggingface.co the first time a line is spoken.
+# Piper's Chinese voices read characters with g2pW. Piper runs g2pW's config.py as code,
+# and transformers fetches the tokenizer it names from huggingface.co unless that name
+# is a local folder.
 G2PW_URL="https://huggingface.co/datasets/rhasspy/piper-checkpoints/resolve/005db054ce8f013d8213b7dd4b0917de3c9347fe/zh/zh_CN/_resources/g2pw.tar.gz"
 G2PW_SHA=252c6f561c11014fbb243d70aec993a816d82109887b91edcda0261ab9967060
 BERT_URL="https://huggingface.co/google-bert/bert-base-chinese/resolve/8f23c25b06e129b6c986331a13d8d025a92cf0ea"
@@ -133,8 +133,7 @@ if ((with_mind)); then
   fetch "$MODEL_URL" "$DATA/models/$MODEL" "$MODEL_SHA"
 
   step "Mutter (Mandarin voice; the mind translates for it)"
-  # g2pW goes in whole and before the voice: with the voice here and g2pW not, Piper
-  # would download its own, unpinned.
+  # Piper downloads its own g2pW, unpinned, when it finds the voice without one.
   g2pw="$DATA/voices/g2pW"
   if [[ $(cat "$g2pw/SHA" 2>/dev/null) != "$G2PW_SHA $BERT_VOCAB_SHA" ]]; then
     fetch "$G2PW_URL" "$DATA/voices/g2pw.tar.gz" "$G2PW_SHA"

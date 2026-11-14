@@ -43,13 +43,16 @@ Events. Each carries its "type". bin/glitch writes all but `turn` and `hello`.
            or ""; body: the full reply or the error, up to 4000 characters; speech: whether
            a say clip follows
   trace    {kind, text, zh, ruby, clip}  what the agent is doing, for the page to list
-           during a turn. kind think: one of its thoughts (a summary of its reasoning);
-           note: a message it wrote that wasn't the reply; zh: a sentence being muttered
-           in Mandarin, where text is the sentence in English, zh the line, ruby what
-           the voice read as [text, pinyin] pairs (a character with its reading, or a
-           run of other text with ""; [] when the voice left none) and clip the id of
-           its mutter clip. text is at most 400 characters. A `heard`, a `fresh` or a
-           "turn" signal ends the list; this server keeps the last TRACE_KEPT for hello.
+           during a turn. text is at most 400 characters, plus "…" when cut. kind is one of:
+             think  a thought (a summary of the agent's reasoning)
+             note   a message it wrote that wasn't the reply
+             zh     a sentence being muttered in Mandarin. text is the sentence in
+                    English, zh the line, clip the id of its mutter clip, and ruby the
+                    text the voice read as [text, pinyin] pairs: one character with
+                    its reading, or a run of other text with "". ruby is [] when the
+                    voice left none.
+           A `heard`, a `fresh` or a "turn" signal ends the list. This server keeps the
+           last TRACE_KEPT for hello.
   approve  {id, ask, label, short, cut, oneline, timeout, left}
            ask: the question to show.
            label: the whole tool input, up to 20000 characters. Bash/Shell (the command),
@@ -90,9 +93,10 @@ Speech (say, ask, aside) plays one clip at a time in arrival order, and the page
 or not at all with no page connected. A clip with `with` set starts no sooner than
 `delay` ms after clip `with` started. An ask clip belongs to approval `approve`: this
 server drops it once that is answered, and the page stops it on `approved`. A mutter
-plays in the same line as speech but is nobody's to wait for: no /api/played, no replay,
-and the page drops it for a reply, an approval, other speech, a recording, a hush, a
-new stream, or when it can't play at once.
+queues with speech, but nothing waits for it: the page POSTs no /api/played for it and
+this server doesn't replay it. The page drops it for a reply, an approval, other speech,
+a recording, a hush or a new stream, and when the page is hidden, has no audio yet or
+can't load the clip.
 
 Routes. Every request: Host must be ADDR:PORT, else 421. Every POST: Origin must be this
 origin, else 403. /api/* and /clips/* answer navigations (Sec-Fetch-Mode navigate or
