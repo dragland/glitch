@@ -24,11 +24,13 @@ orb also moves with what is happening:
   context is (Claude only; Codex doesn't report it). All of it fades when the
   orb starts to speak.
 
-While it works, it also mutters. Every so often it speaks one of the agent's
-thoughts in Mandarin, in a second voice. Apart from a permission question,
-English is only the answer, so a voice mid-turn can't be mistaken for one.
-glitch-mind translates, so the mutter needs an install without `--no-mind`.
-An empty `MUTTER_VOICE` turns it off.
+It can also mutter while it works (off by default). With `MUTTER=1` in
+`~/.config/glitch/glitch.conf` and a re-run of `./install.sh`, every so often it
+speaks one of the agent's thoughts in Mandarin, in a second voice. Apart from a
+permission question, English is only the answer, so a voice mid-turn can't be
+mistaken for one. Mandarin is the only language it has: the voice and the
+phone's pinyin are built for it. glitch-mind translates, so the mutter needs
+an install without `--no-mind`.
 
 ## Install
 
