@@ -165,6 +165,7 @@ const shownReply = () =>
 let saidFor = "", lineFor = null, moreFor = null
 
 function render() {
+  // Android keeps a hidden page's stream open for a while. Closed, this server sees no page and pushes.
   if (document.hidden && !playing && es) leave()
   if (update()) return
   const a = offline ? null : approvals[0], busy = !!turn || local === "listening"
@@ -518,7 +519,7 @@ denyEl.addEventListener("click", () => { if (performance.now() >= armed) answer(
 stopEl.addEventListener("click", () => { unlock(); api("/api/cancel").catch(() => {}) })
 
 const LOST_MS = 3000, PROBE_MS = 3000
-let es = null, lost = 0, probing = 0, synced, met = false
+let es = null, lost = 0, probing = 0, synced, met = false, opening = true
 
 function goOffline() {
   leave()
@@ -531,7 +532,6 @@ function goOffline() {
   probeSoon(PROBE_MS)
 }
 
-// Android keeps a hidden page's stream up for a while: closed, home sees no page and pushes.
 function leave() {
   clearTimeout(lost)
   lost = 0
@@ -557,6 +557,7 @@ async function probe(asked = notice()) {
 }
 
 function reconnect() {
+  opening = true
   leave()
   connect()
   probe()
@@ -572,10 +573,9 @@ function connect() {
     offline = false
     met = true
     if (!persisted) { persisted = true; navigator.storage?.persist?.().catch(() => {}) }
-    if (synced !== globalThis.Notification?.permission) {
-      if (synced === undefined && !h.turn && canOffer()) offering = true
-      sync("open")
-    }
+    if (synced !== globalThis.Notification?.permission) sync()
+    if (opening && !h.turn && canOffer()) offering = true
+    opening = false
     turn = h.turn
     if (turn === "phone") since ||= Date.now()
     else if (!turn) orb.event("rest")
@@ -691,28 +691,22 @@ async function subscribe() {
   if (!sent.ok) throw new Error(`endpoint ${sent.status}`)
 }
 
-async function sync(when, asked) {
-  const perm = synced = globalThis.Notification?.permission
-  let why = `permission ${perm}`, failed = false
-  if (perm === "granted") try { return await subscribe() } catch (e) { failed = true; synced = null; why = `${e.name}: ${e.message}` }
-  const said = localStorage.getItem("glitch.push")
-  if (said === "no" && !failed && !asked) return
-  const app = matchMedia("(display-mode: standalone)").matches ? "app" : "tab"
-  const note = `${when}: ${why}; ${asked ? `asked ${asked}; ` : ""}said ${said}; ${app}; worker ${!!navigator.serviceWorker?.controller}`
-  api("/api/push", failed ? { note } : { endpoint: null, note }).catch(() => {})
+function sync() {
+  synced = globalThis.Notification?.permission
+  if (synced === "granted") subscribe().catch(() => { synced = null })
+  else if (synced) api("/api/push", { endpoint: null }).catch(() => {})
 }
 
 yesEl.addEventListener("click", async () => {
   offering = false
   render()
-  const got = await Notification.requestPermission().catch(e => `${e.name}: ${e.message}`)
-  // Chrome on Android resolves "default" when its prompt goes unanswered.
-  if (got === "default") { offering = true; render() }
-  sync("yes", got)
+  // Chrome resolves "default" when its prompt is dismissed without a choice.
+  if (await Notification.requestPermission().catch(() => null) === "default") { offering = true; render() }
+  sync()
 })
 // Chrome's site controls can grant or take back notifications with no prompt from the page.
 let watched
-navigator.permissions?.query({ name: "notifications" }).then(p => { watched = p; p.onchange = () => sync(`now ${p.state}`) }, () => {})
+navigator.permissions?.query({ name: "notifications" }).then(p => { watched = p; p.onchange = sync }, () => {})
 noEl.addEventListener("click", () => {
   offering = false
   localStorage.setItem("glitch.push", "no")

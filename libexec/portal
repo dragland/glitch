@@ -5,8 +5,8 @@ This docstring is the wire format between bin/glitch, this server, web/app.js an
     portal --addr IP --port N --rt RT --data DATA --glitch BIN --web DIR --plugin DIR
            (--cert PEM --key PEM | --plain) [--max-seconds S]
 
-Files. Only phone turns (bin/glitch with GLITCH_PORTAL=phone) write RT/phone, but for the
-`fresh` event, which either portal appends once RT/phone exists.
+Files. Phone turns (bin/glitch with GLITCH_PORTAL=phone) write RT/phone. Desk turns never do,
+except to append the `fresh` event once RT/phone exists.
   RT/phone/events.jsonl  one event per line, appended by bin/glitch under flock and emptied
                  past 1 MB when a phone turn starts. This server reads it from the start
                  at launch, then tails it and relays each event as SSE.
@@ -64,10 +64,10 @@ Events. Each carries its "type". bin/glitch writes all but `turn` and `hello`.
              carries `since` (CLOCK_BOOTTIME s) instead, and this server works left out.
   approved {id, answer}   allow|deny|none
   hush     {}
-  fresh    {idle}         the session ended: the last exchange (state, heard, reply, unplayed
-                          speech, the notice's reply) is gone. idle: true when RESUME_WINDOW ran
-                          out: ignored while a reply is unheard, and a page on screen keeps showing it
-                          until hidden; else a new session
+  fresh    {idle}         the session ended, so the last exchange is gone: state, heard, reply and
+                          unplayed speech. idle is true when RESUME_WINDOW ran out; this server
+                          drops that one, unrelayed, while a reply is unheard, and a page on
+                          screen keeps the exchange until it is hidden.
   turn     {turn}         desk|phone|null, when RT/turn.portal changes
   hello    {state, turn, approve: [approve...], heard, reply, replay: [clip...]}  first on
            every /api/events stream: the last state event, heard text and reply event, the
@@ -99,12 +99,11 @@ HTML page's inline <style> and <script> blocks.
   GET  /api/reactions   the merged reactions.json (`glitch _reactions`)
   GET  /api/notice      {approve: [approve...], reply: {summary} | null}, for the service
                         worker. reply is set from a reply until its say clip ends, the
-                        next turn starts or a `fresh`; with a page connected, a reply without a say
-                        clip clears after 3 s.
+                        next turn starts or a `fresh` without idle; with a page connected, a reply
+                        without a say clip clears after 3 s.
   GET  /api/push        {key}, the applicationServerKey (404 with no VAPID key)
-  POST /api/push        {endpoint, note}, either optional. endpoint stores this device's
-                        subscription (null forgets it); 422 outside PUSH_HOSTS or with no VAPID
-                        key. note (why the page has no subscription) is only logged.
+  POST /api/push        {endpoint} stores this device's subscription (null forgets it); 422
+                        for an endpoint outside PUSH_HOSTS, or with no VAPID key
   POST /api/talk        a recording (Content-Type one of AUDIO, up to 50 MiB) -> {outcome}:
                         turn, fresh ("new chat" alone), empty (nothing heard) or error;
                         415 type, 413 empty or too big, 422 undecodable, 500 transcription failed
@@ -117,8 +116,8 @@ Push. Pushes carry no payload, so the service worker asks GET /api/notice what t
 Each goes to every device with an endpoint. due() pushes "needs" once an approval has
 waited NEED_AFTER s, "settled" when one it pushed for ends unanswered (timed out, or its
 turn ended), and "finished" when a reply's speech goes unplayed: no page for UNHEARD_AFTER s,
-or a page that didn't play it within its length + 5 s. A hidden page closes its stream once the clip
-it is playing ends, so it counts as no page; it opens a new one each time it is shown.
+or a page that didn't play it within its length + 5 s. A hidden page closes its stream once
+the clip it is playing ends, so it counts as no page. It opens a new one each time it is shown.
 """
 
 import argparse
@@ -753,12 +752,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(200, {"ok": True})
 
     def post_push(self):
-        body = self.body_json()
-        endpoint = body.get("endpoint")
-        if isinstance(body.get("note"), str):
-            self.p.log(f"phone push: {body['note'][:300]!r}"[:400])
-        if "endpoint" not in body:
-            return self.send_json(200, {"ok": True})
+        endpoint = self.body_json().get("endpoint")
         if endpoint is not None and not (self.p.vapid and self.p.push_ok(endpoint)):
             host = urlsplit(endpoint).netloc if isinstance(endpoint, str) else type(endpoint).__name__
             self.p.log(f"refused a push endpoint at {host[:80]!r}: not a known push service")
