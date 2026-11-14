@@ -5,10 +5,10 @@
 
 Has glitch-mind (the local Qwen3) say the thought's first sentence in simple Mandarin
 and prints {"en", "rest", "zh"}: the sentence, what followed it in the thought, and
-the line. The line holds only Chinese characters, digits and Chinese punctuation:
-Piper's Chinese voices speak Latin letters as stray syllables, and the line is shown
-large on the phone. Prints nothing when the sentence is under MIN_EN characters, the
-model is away or slow, or its answer is not such a line; errors go to stderr.
+the line. The line holds only Chinese characters, digits and Chinese punctuation,
+because Piper's Chinese voices speak Latin letters as stray syllables. Prints nothing
+when the sentence is under MIN_EN characters, the model is away or slow, or its
+answer is not such a line. Errors go to stderr.
 """
 
 import json
@@ -33,7 +33,7 @@ END = re.compile(r"[.!?]+[\"')\]]*(?=\s+[A-Z\"'(\[]|\s*$)")
 
 
 def split(thought):
-    """The first sentence and the rest. A summarised thought can open with a bold title."""
+    """Claude's summarised thoughts can open with a bold title."""
     text = " ".join(TITLE.sub("", thought).split())
     m = END.search(text)
     en = text[:m.end()] if m else text
@@ -41,8 +41,7 @@ def split(thought):
 
 
 def translate(en):
-    """The model copies an identifier into the line whatever the prompt says, so it
-    is given the sentence with each one named for what it is."""
+    """Qwen3 copies an identifier into the line whatever the prompt says."""
     en = CODE.sub("the code", FILE.sub("the file", en))
     # Qwen3 spends the whole answer thinking unless its template is told not to.
     body = {"messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": en}],
