@@ -237,10 +237,14 @@ if [[ -n $taken ]]; then
   sed 's/^/      /' <<<"$taken"
   echo "    change one of them (glitch's are in $REPO/hypr/glitch.lua)"
 fi
-if ! grep -q 'require("hypr.glitch")' "$hypr"; then
+# Guarded, so Hyprland's config still loads if the checkout goes before uninstall.sh has run
+# (omarchy plugin remove deletes a plugin's clone).
+hook="if io.open(\"$CONFIG/hypr/glitch.lua\") then require(\"hypr.glitch\") end"
+if ! grep -qxF "$hook" "$hypr"; then
   cp "$hypr" "$hypr.bak.$(date +%s)"
-  printf '\n-- glitch voice companion (%s)\nrequire("hypr.glitch")\n' "$REPO" >>"$hypr"
-  ok "added require(\"hypr.glitch\") to ~/.config/hypr/hyprland.lua"
+  sed -i -z 's/\n\n-- glitch voice companion[^\n]*\n[^\n]*require("hypr\.glitch")[^\n]*\n/\n/' "$hypr"
+  printf '\n-- glitch voice companion (%s)\n%s\n' "$REPO" "$hook" >>"$hypr"
+  ok "added glitch's keys to ~/.config/hypr/hyprland.lua"
 fi
 hyprctl reload >/dev/null
 if [[ -n $(hyprctl configerrors 2>/dev/null | tr -d '[:space:]') ]]; then
@@ -253,7 +257,7 @@ if ((with_mind)); then
   step "Mind service"
   link "$REPO/systemd/glitch-mind.service" "$CONFIG/systemd/user/glitch-mind.service"
   systemctl --user daemon-reload
-  systemctl --user enable glitch-mind.service >/dev/null 2>&1
+  systemctl --user enable glitch-mind.service >/dev/null 2>&1 || die "couldn't enable glitch-mind (systemctl --user status glitch-mind)"
   systemctl --user restart glitch-mind.service
   mind_port=$(conf MIND_PORT)
   for _ in $(seq 1 30); do curl -fs "localhost:$mind_port/health" >/dev/null 2>&1 && break; sleep 1; done

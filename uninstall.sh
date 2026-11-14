@@ -27,9 +27,9 @@ omarchy-shell -q shell rescanPlugins >/dev/null 2>&1
 hypr="$CONFIG/hypr/hyprland.lua"
 if grep -q 'require("hypr.glitch")' "$hypr" 2>/dev/null; then
   cp "$hypr" "$hypr.bak.$(date +%s)"
-  sed -i -z 's/\n\n-- glitch voice companion[^\n]*\nrequire("hypr.glitch")\n/\n/' "$hypr"
-  sed -i '/^-- glitch voice companion/d; /^require("hypr.glitch")$/d' "$hypr"
-  echo "    removed require(\"hypr.glitch\") from ~/.config/hypr/hyprland.lua"
+  sed -i -z 's/\n\n-- glitch voice companion[^\n]*\n[^\n]*require("hypr\.glitch")[^\n]*\n/\n/' "$hypr"
+  sed -i '/^-- glitch voice companion/d; /require("hypr\.glitch")/d' "$hypr"
+  echo "    removed glitch's keys from ~/.config/hypr/hyprland.lua"
 fi
 unlink_if_link "$CONFIG/hypr/glitch.lua"
 hyprctl reload >/dev/null 2>&1

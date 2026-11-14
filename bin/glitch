@@ -237,8 +237,8 @@ phone_fresh() {
 }
 
 cmd_expire() {
-  [[ $1 == card ]] && close_card
-  [[ $1 == session && -z $(turn_portal) ]] && phone_fresh idle
+  [[ ${1:-card} == card ]] && close_card
+  [[ ${1:-session} == session && -z $(turn_portal) ]] && phone_fresh idle
   return 0
 }
 
@@ -1040,7 +1040,8 @@ cmd_approve() {
   *) ask="Okay to do that?" ;;
   esac
   log "approve? $short"
-  if [[ $PORTAL == desk && (-z $tool || -z $short) ]]; then
+  if [[ $PORTAL == desk && (-z $tool || $tool == null || -z $short) ]]; then
+    log "approve: nothing to show, denied"
     jq -cn '{hookSpecificOutput: {hookEventName: "PermissionRequest", decision: {behavior: "deny",
       message: "It couldn\u0027t be shown to the user, so it was denied. Don\u0027t retry it; say what you needed, starting the SAY line with Need you."}}}'
     return 0

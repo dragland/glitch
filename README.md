@@ -50,7 +50,7 @@ and Claude Code or Codex. What install.sh does to the machine:
   with a small local model that picks the orb's reactions (1.1 GB; `--no-mind`
   skips it). The model runs on the GPU through Vulkan where there is a driver
   and on the CPU otherwise. The mutter adds ~0.2 GB.
-- Binds the keys below with one `require` line in `~/.config/hypr/hyprland.lua`.
+- Binds the keys below with one line in `~/.config/hypr/hyprland.lua`.
 - Asks for root once, for desktop control: it installs ydotool and gives your
   login session `/dev/uinput`, and it adds [config/desktop.md](config/desktop.md)
   to `~/.claude/rules`, which every Claude session on the machine reads.
@@ -66,7 +66,8 @@ Update with `omarchy plugin update dragland.glitch` (`git pull` in a clone
 elsewhere), then run `install.sh` again. To remove it, run `uninstall.sh` first
 (`--purge` also deletes downloads and settings) and only then, if you added it
 as a plugin, `omarchy plugin remove dragland.glitch`: that command deletes the
-folder uninstall.sh lives in. Uninstalling leaves the root part of desktop
+folder uninstall.sh lives in. (Removed in the wrong order, glitch simply stops;
+clone it again and run its `uninstall.sh` to clean up.) Uninstalling leaves the root part of desktop
 control: `sudo pacman -R ydotool && sudo rm
 /etc/udev/rules.d/70-uinput.rules /etc/modules-load.d/uinput.conf` removes it.
 
