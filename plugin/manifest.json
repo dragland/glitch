@@ -3,8 +3,12 @@
   "id": "dragland.glitch",
   "name": "Glitch",
   "version": "0.1.0",
-  "description": "The orb for glitch: a Beep Jev-style creature that shows what your voice agent is doing.",
-  "kinds": ["panel"],
+  "author": "dragland",
+  "license": "MIT",
+  "description": "Voice companion for your coding agent: tap a key, talk, and an orb shows it at work. Run install.sh after adding it.",
+  "kinds": [
+    "panel"
+  ],
   "keepLoaded": true,
   "entryPoints": {
     "panel": "Glitch.qml"

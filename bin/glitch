@@ -15,6 +15,7 @@
 #   glitch unpair          forget every paired phone
 #   glitch portal          run the phone portal's server
 #   glitch cert [--renew]  make the portal's certificate, and the CA file the phone installs
+#   glitch phone [--status|--off]  set up the phone portal (address, certificate, QR code), report on it, or turn it off
 #
 # Defaults in <repo>/config, overrides in ~/.config/glitch, downloads in
 # ~/.local/share/glitch, live state in $XDG_RUNTIME_DIR/glitch, the reply card's
@@ -35,7 +36,28 @@ CARD="$RT/card"
 . "$GLITCH_HOME/config/glitch.conf"
 # shellcheck source=/dev/null
 [[ -f $USER_CONF/glitch.conf ]] && . "$USER_CONF/glitch.conf"
-export GLITCH_BEEP_VOLUME="${BEEP_VOLUME:-2.0}" MIND JEV_MODEL OPENAI_DECIDE_MODEL
+export GLITCH_BEEP_VOLUME="${BEEP_VOLUME:-2.0}" MIND JEV_MODEL OPENAI_DECIDE_MODEL GLITCH_MIND_PORT="$MIND_PORT"
+
+case "${1:-}" in
+_mind)
+  # llama-server splits -c across the -np slots: 1024 each, for ~400-token prompts. Any web
+  # page can reach localhost, so the model needs the key. A CPU build ignores -ngl.
+  exec "$DATA/llama/llama-server" -m "$DATA/models/Qwen3-1.7B-Q4_K_M.gguf" -ngl 99 --host 127.0.0.1 --port "$MIND_PORT" \
+    -c 2048 -np 2 --no-slots --no-webui --api-key-file "$DATA/mind.key"
+  ;;
+_remote)
+  # 78 is EX_CONFIG, which glitch-remote.service doesn't restart on.
+  [[ $REMOTE == 1 ]] || { echo "glitch remote: off (REMOTE=1 in $USER_CONF/glitch.conf turns it on)" >&2; exit 78; }
+  cd "$WORKDIR" || exit 78
+  # claude exits on an unknown mode, and the unit would restart it every 30 s.
+  [[ $REMOTE_PERMISSION_MODE =~ ^(default|acceptEdits|auto|plan|dontAsk|bypassPermissions)$ ]] ||
+    { echo "glitch remote: REMOTE_PERMISSION_MODE=$REMOTE_PERMISSION_MODE isn't a permission mode" >&2; exit 78; }
+  # claude is mise's wrapper (omarchy-agent-account-exec), which sets the Claude home
+  # (CLAUDE_CONFIG_DIR, which glitch _reap reads) and execs the real binary. Never add
+  # --no-create-session-in-dir: it archives every session on stop.
+  exec claude remote-control --spawn same-dir --chrome --permission-mode "$REMOTE_PERMISSION_MODE"
+  ;;
+esac
 
 PY="$DATA/venv/bin/python"
 PORTAL=desk
@@ -177,8 +199,7 @@ clip_sent() {
      delay:(if $with == "" then 0 else $lead | tonumber * 1000 | round end), approve:($approve | opt)}')"
 }
 
-# A live signal for the orb (listed at the top of plugin/orb.mjs). A file the
-# orb tails, because IPC costs a process per call.
+# A live signal for the orb (plugin/orb.mjs lists them).
 ev() {
   if [[ $PORTAL == phone ]]; then
     local l=${*//\\/\\\\}
@@ -213,8 +234,9 @@ phone_fresh() {
 }
 
 cmd_expire() {
-  close_card
-  [[ -n $(turn_portal) ]] || phone_fresh idle
+  [[ ${1:-card} == card ]] && close_card
+  [[ ${1:-session} == session && -z $(turn_portal) ]] && phone_fresh idle
+  return 0
 }
 
 reactions() {
@@ -315,6 +337,9 @@ markup_escape() {
 
 notify() {
   local id
+  # omarchy-notification-send reads a leading dash as an option, and both texts are the agent's.
+  [[ $1 == -* ]] && set -- "glitch: $1" "${@:2}"
+  [[ ${2:-} == -* ]] && set -- "$1" " $2" "${@:3}"
   id=$(omarchy-notification-send --app-name glitch -g "󰍬" -u critical -p \
     -r "$(cat "$RT/notify.id" 2>/dev/null || echo 0)" "$@" 2>>"$RT/glitch.log") || {
     log "notify failed: $1"
@@ -337,15 +362,20 @@ close_card() {
 
 card_sweep() {
   [[ -e $CARD && -z $(turn_portal) ]] || return 0
-  [[ -e $RT/notify.id ]] && ((EPOCHSECONDS - $(stat -c %Y "$RT/sid" 2>/dev/null || echo 0) < RESUME_WINDOW + 60)) && return 0
+  [[ -e $RT/notify.id ]] && ((EPOCHSECONDS - $(stat -c %Y "$RT/sid" 2>/dev/null || echo 0) < CARD_SECONDS + 60)) && return 0
   close_card && log "card swept"
 }
 
 expire_later() {
   local mt
   mt=$(stat -c %Y "$RT/sid" 2>/dev/null) || return 0
-  setsid bash -c "sleep $((RESUME_WINDOW + 2)); [[ \$(stat -c %Y '$RT/sid' 2>/dev/null) == $mt ]] && exec '$0' _expire" \
-    </dev/null >/dev/null 2>&1 8>&- 9>&- &
+  local what secs
+  for what in card session; do
+    secs=$CARD_SECONDS
+    [[ $what == session ]] && secs=$RESUME_WINDOW
+    setsid bash -c 'sleep "$1"; [[ $(stat -c %Y "$2" 2>/dev/null) == "$3" ]] && exec "$4" _expire "$5"' _ $((secs + 2)) "$RT/sid" "$mt" "$0" "$what" \
+      </dev/null >/dev/null 2>&1 8>&- 9>&- &
+  done
 }
 
 # --- live reactions (the local decision model, see libexec/decide) --------------
@@ -412,7 +442,7 @@ working() {
 }
 
 mutter() {
-  [[ $SPEAK == 1 && -x $PY && -n $MUTTER_VOICE && -f $MUTTER_VOICE ]] || return 1
+  [[ $MUTTER == 1 && $SPEAK == 1 && -x $PY && -n $MUTTER_VOICE && -f $MUTTER_VOICE ]] || return 1
   ((EPOCHSECONDS - LAST_MUTTER >= MUTTER_EVERY)) && working || return 1
   [[ $PORTAL == desk ]] || page_online || return 1
   LAST_MUTTER=$EPOCHSECONDS
@@ -490,7 +520,7 @@ adapter_claude() {
   # one to `glitch _approve`.
   local hook wait=75
   [[ $PORTAL == phone ]] && wait=$((PORTAL_APPROVE_TIMEOUT + 15))
-  hook=$(jq -cn --arg cmd "$GLITCH_HOME/bin/glitch _approve" --argjson wait "$wait" \
+  hook=$(jq -cn --arg cmd "$(printf '%q _approve' "$GLITCH_HOME/bin/glitch")" --argjson wait "$wait" \
     '{hooks: {PermissionRequest: [{matcher: "*", hooks: [{type: "command", command: $cmd, timeout: $wait}]}]}}')
   args=(-p --output-format stream-json --verbose --include-partial-messages
     --permission-mode auto --permission-prompts none --settings "$hook" --chrome
@@ -674,7 +704,7 @@ cmd_start() {
   set_state listening
   chime start
   # voxtype cuts a recording at its cap, so send just before it.
-  setsid bash -c "sleep $((RECORD_LIMIT - 10)); [[ \$(cat '$RT/recording' 2>/dev/null) == $stamp ]] && exec '$0' stop" \
+  setsid bash -c 'sleep "$1"; [[ $(cat "$2" 2>/dev/null) == "$3" ]] && exec "$4" stop' _ $((RECORD_LIMIT - 10)) "$RT/recording" "$stamp" "$0" \
     </dev/null >/dev/null 2>&1 8>&- 9>&- &
 }
 
@@ -896,7 +926,7 @@ cmd_turn() {
     phone_send "$(jqs '{type:"reply", summary:$s[0], body:$s[1][0:4000], speech:($s[2] == "true")}' \
       -- "$say" "${failed:-$result}" "$([[ -s $RT/say.wav ]] && echo true || echo false)")"
   else
-    notify "$summary" "$body" --exec "$0" open &
+    ((CARD_SECONDS > 0)) && notify "$summary" "$body" --exec "$0" open &
   fi
   set_state "$state" "$say"
   (
@@ -1007,6 +1037,12 @@ cmd_approve() {
   *) ask="Okay to do that?" ;;
   esac
   log "approve? $short"
+  if [[ $PORTAL == desk && (-z $tool || $tool == null || -z $short) ]]; then
+    log "approve: nothing to show, denied"
+    jq -cn '{hookSpecificOutput: {hookEventName: "PermissionRequest", decision: {behavior: "deny",
+      message: "It couldn\u0027t be shown to the user, so it was denied. Don\u0027t retry it; say what you needed, starting the SAY line with Need you."}}}'
+    return 0
+  fi
   before=$(cat "$(state_file)" 2>/dev/null)
   stop_mutter
   REACTION=$(reaction needs_you)
@@ -1160,7 +1196,7 @@ cmd_unpair() {
 cmd_cert() {
   local ca="$DATA/portal/glitch-ca.crt" from to=99991231235959Z fp d
   if [[ ! $PORTAL_ADDR =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
-    echo "glitch cert: set PORTAL_ADDR (this machine's LAN address, e.g. 192.168.1.12) in $USER_CONF/glitch.conf" >&2
+    echo "glitch cert: set PORTAL_ADDR (this machine's LAN address, e.g. 192.168.1.20) in $USER_CONF/glitch.conf" >&2
     return 1
   fi
   if [[ $1 != --renew && (-e $PORTAL_CERT || -e $ca) ]]; then
@@ -1203,14 +1239,121 @@ cmd_cert() {
   d=$?
   rm -rf "$tmp"
   ((d == 0)) || { echo "glitch cert: couldn't write the certificate" >&2; return 1; }
-  fp=$(openssl x509 -inform DER -in "$ca" -noout -fingerprint -sha256 | cut -d= -f2)
+  fp=$(portal_ca_fingerprint)
   log "portal certificate made for $PORTAL_ADDR (CA $fp)"
   echo "CA file for the phone: $ca"
   echo "SHA-256: $fp"
-  echo "On the phone: Settings > Security > Encryption & credentials > Install a certificate > CA certificate,"
-  echo "pick this file and check the fingerprint. It vouches only for $PORTAL_ADDR, and its key is gone."
+  echo "On the phone: Settings > Security & privacy > More security settings > Encryption & credentials > Install a certificate > CA certificate,"
+  echo "pick this file, then check this fingerprint against the one under Trusted credentials > User."
+  echo "It vouches only for $PORTAL_ADDR, and its key is gone."
   [[ $1 == --renew ]] && echo "The portal serves the new certificate once restarted: systemctl --user restart glitch-portal"
   return 0
+}
+
+portal_ca_fingerprint() { openssl x509 -inform DER -in "$DATA/portal/glitch-ca.crt" -noout -fingerprint -sha256 | cut -d= -f2; }
+
+portal_reach() {
+  local lan a b c d n rules prefs routes ts todo=()
+  lan=$(ip -j -4 addr show 2>/dev/null | jq -r --arg a "$PORTAL_ADDR" \
+    '.[] | select(.ifname != "tailscale0") | .addr_info[] | select(.local == $a) | .prefixlen' | head -1)
+  if [[ -z $lan ]]; then
+    echo "warning: $PORTAL_ADDR (PORTAL_ADDR) isn't an address of this machine (ip -4 addr)"
+  elif command -v ufw >/dev/null; then
+    IFS=. read -r a b c d <<<"$PORTAL_ADDR"
+    n=$(((a << 24 | b << 16 | c << 8 | d) & (0xffffffff << (32 - lan)) & 0xffffffff))
+    lan="$((n >> 24)).$((n >> 16 & 255)).$((n >> 8 & 255)).$((n & 255))/$lan"
+    # ufw saves each rule in user.rules as "### tuple ### allow tcp <port> <dst> any <src> in[_<iface>]".
+    rules=$(cat /etc/ufw/user.rules 2>/dev/null)
+    grep -q "^### tuple ### allow tcp $PORTAL_PORT 0\.0\.0\.0/0 any ${lan//./\\.} in\b" <<<"$rules" ||
+      todo+=("sudo ufw allow from $lan to any port $PORTAL_PORT proto tcp comment 'glitch portal LAN'")
+    grep -q "^### tuple ### allow tcp $PORTAL_PORT 0\.0\.0\.0/0 any 0\.0\.0\.0/0 in_tailscale0\b" <<<"$rules" ||
+      todo+=("sudo ufw allow in on tailscale0 to any port $PORTAL_PORT proto tcp comment 'glitch portal Tailscale'")
+  fi
+  if command -v tailscale >/dev/null; then
+    # --advertise-routes replaces the whole list, so repeat the routes already advertised.
+    prefs=$(tailscale debug prefs 2>/dev/null) || prefs='{"AdvertiseRoutes":["<routes it already advertises>"]}'
+    routes=$(jq -r --arg r "$PORTAL_ADDR/32" '.AdvertiseRoutes // [] | if index([$r]) then "" else . + [$r] | join(",") end' <<<"$prefs")
+    ts="sudo "
+    [[ $(jq -r '.OperatorUser // ""' <<<"$prefs") == "$(id -un)" ]] && ts=
+    [[ -n $routes ]] && todo+=("${ts}tailscale set --advertise-routes=$routes")
+  fi
+  ((${#todo[@]})) || return 0
+  echo "To reach it from the phone, run:"
+  printf '  %s\n' "${todo[@]}"
+  [[ ${todo[*]} == *advertise-routes* ]] &&
+    echo "then approve the $PORTAL_ADDR/32 route in the Tailscale admin console (Machines) and turn on Use Tailscale subnets in the phone's Tailscale app (only needed away from home)"
+  return 0
+}
+
+portal_status() {
+  if [[ -z $PORTAL_ADDR || ! -f $DATA/portal/glitch-ca.crt ]] || ! systemctl --user is-enabled --quiet glitch-portal.service 2>/dev/null; then
+    echo "off (turn it on with: glitch phone)"
+  elif systemctl --user is-active --quiet glitch-portal.service; then
+    echo "https://$PORTAL_ADDR:$PORTAL_PORT (pair a phone: glitch pair)"
+    portal_reach
+  else
+    echo "warning: glitch-portal isn't running (journalctl --user -u glitch-portal)"
+  fi
+}
+
+cmd_phone() {
+  local url route dev unit conf="$USER_CONF/glitch.conf"
+  case ${1:-} in
+  --status) portal_status; return 0 ;;
+  --off)
+    systemctl --user disable --now glitch-portal.service >/dev/null 2>&1
+    echo "The phone portal is off. Paired phones stay paired; glitch phone turns it back on."
+    return 0
+    ;;
+  esac
+  if [[ -z $PORTAL_ADDR ]]; then
+    route=$(ip -j -4 route get 1.1.1.1 2>/dev/null)
+    PORTAL_ADDR=$(jq -r '.[0].prefsrc // empty' <<<"$route")
+    dev=$(jq -r '.[0].dev // empty' <<<"$route")
+    # /sys type 1 is Ethernet or Wi-Fi; a tunnel has another.
+    if [[ ! $PORTAL_ADDR =~ ^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)[0-9.]+$ || $dev == tap* ||
+      $(cat "/sys/class/net/$dev/type" 2>/dev/null) != 1 ]]; then
+      echo "glitch phone: couldn't tell this machine's home network address (found ${PORTAL_ADDR:-none} on ${dev:-no interface})." >&2
+      echo "  Set PORTAL_ADDR to its LAN address (ip -4 addr) in $conf and run glitch phone again." >&2
+      return 1
+    fi
+    mkdir -p "$USER_CONF"
+    [[ -s $conf && -n $(tail -c1 "$conf") ]] && echo >>"$conf"
+    printf 'PORTAL_ADDR=%s\n' "$PORTAL_ADDR" >>"$conf"
+    echo "1. Address: $PORTAL_ADDR on $dev (written to $conf)."
+    echo "   The certificate and the paired app are tied to it, so reserve it for this machine in your router (a DHCP reservation)."
+  else
+    echo "1. Address: $PORTAL_ADDR"
+  fi
+  if [[ -f $DATA/portal/glitch-ca.crt && -f $PORTAL_CERT && -f $PORTAL_KEY ]]; then
+    echo "2. Certificate: have one"
+  else
+    cmd_cert "" >/dev/null || return 1
+    echo "2. Certificate: made"
+  fi
+  # systemctl disable removes a linked unit's file.
+  unit="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/glitch-portal.service"
+  mkdir -p "${unit%/*}" && ln -sfn "$GLITCH_HOME/systemd/glitch-portal.service" "$unit"
+  systemctl --user daemon-reload
+  systemctl --user enable glitch-portal.service >/dev/null 2>&1
+  systemctl --user restart glitch-portal.service >/dev/null 2>&1
+  sleep 2
+  if ! systemctl --user is-active --quiet glitch-portal.service; then
+    echo "glitch phone: glitch-portal didn't start (journalctl --user -u glitch-portal)" >&2
+    return 1
+  fi
+  echo "3. Portal: running"
+  portal_reach | sed 's/^/   /'
+  url="https://$PORTAL_ADDR:$PORTAL_PORT/setup"
+  echo "4. On the phone (Android, Chrome), on the same Wi-Fi, open $url"
+  command -v qrencode >/dev/null && qrencode -t ANSIUTF8 -m 2 "$url"
+  echo "   Chrome warns that the connection isn't private, because the phone doesn't trust the certificate yet:"
+  echo "   choose Advanced, then Proceed. The page hands over the certificate and walks through installing it."
+  echo "5. Before pairing, check what the phone installed: Settings > Security & privacy > More security settings > Encryption & credentials >"
+  echo "   Trusted credentials > User, tap the glitch certificate, and compare its SHA-256 fingerprint with this one:"
+  echo "   $(portal_ca_fingerprint)"
+  echo "   If they differ, remove it: something on the network answered in this computer's place."
+  echo "6. Then say \"pair my phone\" at the desk (or run: glitch pair) and type the code on the phone."
 }
 
 # 78 is EX_CONFIG, which glitch-portal.service doesn't restart on.
@@ -1246,9 +1389,10 @@ pair) cmd_pair ;;
 unpair) cmd_unpair ;;
 portal) cmd_portal ;;
 cert) cmd_cert "${2:-}" ;;
+phone) cmd_phone "${2:-}" ;;
 _live) cmd_live ;;
 _mutter) cmd_mutter ;;
-_expire) cmd_expire ;;
+_expire) cmd_expire "${2:-}" ;;
 _approve) cmd_approve ;;
 _reap) cmd_reap ;;
 open) cmd_open ;;
@@ -1260,5 +1404,5 @@ say)
   say_aside "$@"
   ;;
 state) cat "$RT/state.json" 2>/dev/null ;;
-*) sed -n '3,17p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+*) sed -n '3,18p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

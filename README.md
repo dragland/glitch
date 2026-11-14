@@ -1,53 +1,57 @@
 # glitch
 
-A voice-first companion for [Omarchy](https://omarchy.org). Tap **Super+D**,
-talk, tap again: your coding agent (Claude Code or Codex, whichever is Omarchy's
-default) does it headless, while a little creature at the bottom of the screen
-shows what it's doing, beeps its mood and speaks a one-line answer. The full
-reply waits on a sticky card; click it to open the conversation.
+Voice companion for [Omarchy](https://omarchy.org). Tap a key, talk, and an orb shows your coding agent at work.
 
-The creature grew out of Yohei Nakajima's [Beep Jev](https://beepjev.replit.app):
-its patterns, palettes, motions and beep synth. A decision model (local by
-default) stands in for Jev, picking its look and sound as the agent works. The
-orb also moves with what is happening:
+<div align="center">
+  <img src="docs/orb.webp" width="360" alt="The orb waking up, saying hello, listening, working and reporting back" />
+</div>
 
-- **Voice.** The halo follows the mic while you talk and its own voice while
-  it answers. Rings travel inward for you and outward for it.
-- **The eye is the pattern.** The pattern is centred and magnified at the
-  point it looks at: the middle while you talk, the work while it works. It
-  blinks.
-- **Working.** The pattern drifts as text streams. Reading shows a radar
-  sweep, an edit flashes the rim and fills in checker cells, and a comet runs
-  the rim while a command or subagent is out.
-- **The turn.** One pale tick appears on the rim per tool call, and a moon
-  orbits per subagent, returning with a ping. A faint tide shows how full the
-  context is (Claude only; Codex doesn't report it). All of it fades when the
-  orb starts to speak.
+## How it works
 
-While it works, it also mutters. Every so often it speaks one of the agent's
-thoughts in Mandarin, in a second voice. Apart from a permission question,
-English is only the answer, so a voice mid-turn can't be mistaken for one.
-glitch-mind translates, so the mutter needs an install without `--no-mind`.
-An empty `MUTTER_VOICE` turns it off.
+- Tap **Super+D**, talk, tap again
+- Local Whisper (voxtype) transcribes it, and your coding agent (Claude Code or Codex, whichever is Omarchy's default) does it headless
+- An orb at the bottom of the screen reacts as the agent works and beeps its mood
+- It speaks a one-line answer, and the full reply waits on a card that opens the conversation
+- When the agent needs permission, the orb asks out loud and Omarchy's menu offers Allow once / Deny
+- Root goes through `pkexec`, so you get Omarchy's fingerprint or password dialog
+
+## The orb
+
+Its patterns, palettes, motions and beep synth come from Yohei Nakajima's [Beep Jev](https://beepjev.replit.app). A small local model picks its look and sound as the agent works.
+
+- **Voice.** The halo follows the mic while you talk and its own voice while it answers. Rings travel inward for you and outward for it.
+- **Eye.** The pattern is magnified where it looks: the middle while you talk, the work while it works. It blinks.
+- **Work.** The pattern drifts as text streams. Reading shows a radar sweep, an edit flashes the rim, and a comet runs the rim while a command or subagent is out.
+- **Turn.** One tick appears on the rim per tool call and a moon orbits per subagent. A faint tide shows how full the context is (Claude only).
 
 ## Install
 
 ```bash
-git clone git@github.com:dragland/glitch.git ~/glitch
-~/glitch/install.sh
+omarchy plugin add https://github.com/dragland/glitch.git
+~/.config/omarchy/plugins/dragland.glitch/install.sh
 ```
 
-Needs Omarchy 4 with voxtype dictation (`omarchy-voxtype-install`) and Claude
-Code or Codex. Root once, for desktop control (`--no-desktop` skips it).
-Downloads (~1.5 GB, pinned in install.sh) go to `~/.local/share/glitch`;
-`--no-mind` skips the local model.
+`add` only clones the plugin; install.sh does the rest. A clone anywhere else works too, through its own `install.sh`.
 
-Update with `git pull && ./install.sh`; remove with `./uninstall.sh`
-(`--purge` also deletes downloads and settings). It leaves the root part of
-desktop control: `sudo pacman -R ydotool && sudo rm
-/etc/udev/rules.d/70-uinput.rules /etc/modules-load.d/uinput.conf` removes it.
+**Prerequisites**: Omarchy 4, voxtype dictation (`omarchy install dictation voxtype`), and Claude Code or Codex
 
-## Use
+What install.sh changes on the machine:
+
+- Downloads ~1.5 GB to `~/.local/share/glitch`, pinned and checksummed: a Python environment, a Piper voice, and llama.cpp with the orb's model (1.1 GB; `--no-mind` skips it). The model runs on the GPU through Vulkan where there is a driver, and on the CPU otherwise.
+- Adds one line to `~/.config/hypr/hyprland.lua` for the keys below
+- Asks for root once, for desktop control: it installs ydotool, gives your login session `/dev/uinput`, and adds [config/desktop.md](config/desktop.md) to `~/.claude/rules`, which every Claude session on the machine reads. `--no-desktop` skips all of it.
+- Raises voxtype's recording cap to 10 minutes and gives Whisper a vocabulary hint (`--no-voxtype` skips both; then set `RECORD_LIMIT` to voxtype's own cap)
+- Installs `uv` through mise if it is missing, starts the `glitch-mind` user service, and restarts the Omarchy shell to load the orb
+
+**Update**: `omarchy plugin update dragland.glitch` (`git pull` in a clone elsewhere), then run `install.sh` again.
+
+**Remove**: run `uninstall.sh` first (`--purge` also deletes downloads and settings), and only then `omarchy plugin remove dragland.glitch`, which deletes the folder uninstall.sh lives in. If you removed it first, clone it again and run its `uninstall.sh`. Uninstalling leaves the root part of desktop control:
+
+```bash
+sudo pacman -R ydotool && sudo rm /etc/udev/rules.d/70-uinput.rules /etc/modules-load.d/uinput.conf
+```
+
+## Usage
 
 | Key | |
 |---|---|
@@ -56,96 +60,97 @@ desktop control: `sudo pacman -R ydotool && sudo rm
 | Super+Alt+Shift+D | open the session in a terminal |
 | Super+Alt+Backspace | cancel the recording, the turn and the speech |
 
-A tap while glitch is talking just quiets it, and "new task, …" starts fresh
-by voice. While the reply card is on screen (15 minutes after the last turn),
-the next Super+D continues that session.
+- A tap while glitch is talking quiets it
+- "new task, …" starts a fresh session by voice
+- For 15 minutes after a turn, the next Super+D continues that session (`RESUME_WINDOW`) and the reply card stays on screen (`CARD_SECONDS`; 0 shows no card)
+- The agent runs the way `omarchy-agent` runs it: Claude in auto mode, Codex with `--approve-for-me`
+- Claude can use your signed-in Chrome through Claude in Chrome (sign the extension into the same claude.ai account), and the rest of the desktop with grim, hyprctl, ydotool and wtype
 
-The agent runs the way `omarchy-agent` runs it (Claude in auto mode, Codex
-with `--approve-for-me`). When Claude would ask your permission, the orb asks
-out loud and Omarchy's menu offers Allow once / Deny; root goes through
-`pkexec`, so you get Omarchy's fingerprint or password dialog.
+## Settings
 
-Claude can use your signed-in Chrome through Claude in Chrome (sign the
-extension into the same claude.ai account). Linux has no built-in computer use,
-so [config/desktop.md](config/desktop.md) tells every Claude session (voice,
-phone, terminal) to take screenshots, find and launch windows, click and type
-with grim, hyprctl, ydotool and wtype.
+Defaults are in [config/glitch.conf](config/glitch.conf); override them in `~/.config/glitch/glitch.conf`. Your own `reactions.json` there merges over the default, and your own `voice-prompt.md` replaces it (a session reads it when it starts, so try it with Super+Alt+D).
 
-### From the Claude app
+Three parts are off until you turn them on.
 
-While you're logged in, `glitch-remote` (Claude Code's remote control) lists
-this machine in the Claude app and at claude.ai/code. Sessions you or your
-claude.ai projects start there run in `~/Work` with `bypassPermissions` and
-Claude in Chrome (`systemctl --user edit glitch-remote` changes that).
-Glitch's own voice turns (`claude -p`) don't appear there.
+### Mutter
 
-- The first install asks you to run `claude remote-control` once in `~/Work`
-  to accept its prompts. `./install.sh --no-remote` leaves remote control out
-  entirely.
-- After an hour with no Claude activity (`REMOTE_IDLE_MIN`), the server
-  restarts to free its sessions. The next message brings a session back with
-  its context.
-- Anyone signed into your claude.ai account can drive these sessions, so turn
-  on Require trusted devices at claude.ai/settings/account.
+With `MUTTER=1` and a re-run of `install.sh` (~0.2 GB more), glitch now and then speaks one of the agent's thoughts in Mandarin, in a second voice. It speaks English only for its answer and a permission question, so a Mandarin voice mid-turn can't be mistaken for either. Mandarin is its only language, since the voice and the phone's pinyin are built for it. It needs the local model.
+
+### Remote control
+
+With `REMOTE=1` and a re-run of `install.sh`, this machine shows up in the Claude app and at claude.ai/code while you're logged in (Claude Code's remote control, as the `glitch-remote` service).
+
+- Sessions started there run in `WORKDIR` (`~/Work`) with Claude in Chrome
+- `REMOTE_PERMISSION_MODE` sets their permission mode. The default, `auto`, has Claude judge each action itself. `bypassPermissions` skips every check, so set it only if anyone who can reach your claude.ai account may do anything on this machine. Restart `glitch-remote` after changing it.
+- The first install asks you to run `claude remote-control` once in `WORKDIR` to accept its prompts
+- After an hour with no Claude activity (`REMOTE_IDLE_MIN`), the server restarts to free its sessions. The next message brings a session back with its context.
+- Anyone signed into your claude.ai account can drive these sessions, so turn on Require trusted devices at claude.ai/settings/account
+- glitch's own voice turns don't appear there
 
 ### Phone portal
 
-A page with its own orb that the phone opens over HTTPS, at home or through
-Tailscale. It talks to the same conversation as Super+D, and a turn asked from
-the phone answers only on the phone. It runs while you're logged in at the desk.
+A page with its own orb that the phone opens over HTTPS, at home or through Tailscale. It talks to the same conversation as Super+D, and a turn asked from the phone answers only on the phone. It runs while you're logged in at the desk. So far tried only on Android with Chrome.
 
-1. Reserve this machine's address in your router (a DHCP reservation), since the certificate and the paired app are tied to it, and set `PORTAL_ADDR=<that address>` in `~/.config/glitch/glitch.conf`.
-2. Run `glitch cert`.
-3. Copy `~/.local/share/glitch/portal/glitch-ca.crt` to the phone and install it in Settings > Security > Encryption & credentials > Install a certificate > CA certificate. Check that its fingerprint matches the one `glitch cert` printed. `glitch cert` destroys the CA's key, so it can't vouch for anything else.
-4. Re-run `./install.sh`. It starts the portal and prints its address and the firewall and Tailscale commands left for you to run.
-5. Open that address on the phone, say "pair my phone" at the desk (or run `glitch pair`), and type the code it speaks.
-6. Install it to the home screen.
+1. Run `glitch phone`. It picks this machine's LAN address, makes a certificate, starts the portal, and prints the firewall and Tailscale commands left for you to run, then a QR code. Reserve that address in your router (a DHCP reservation), since the certificate and the paired app are tied to it.
+2. Scan the code on the phone, on the same Wi-Fi, and proceed past Chrome's warning (Advanced, then Proceed), since the phone doesn't trust the certificate yet. The page hands it over and walks through installing it in Settings.
+3. Before pairing, open the installed certificate on the phone (Trusted credentials > User) and compare its SHA-256 fingerprint with the one `glitch phone` printed. Nothing protected that download, so remove the certificate if they differ. The real one vouches only for that one address, and the key that signed it is destroyed.
+4. Open glitch from that page, say "pair my phone" at the desk (or run `glitch pair`), and type the code it speaks.
+5. Install it to the home screen.
 
-If the address changes, run `glitch cert --renew` and install the new CA file on the phone. After a new address or `PORTAL_PORT`, re-run `./install.sh`, add the app to the home screen again and pair it again. `glitch unpair` forgets every phone.
+On the phone:
 
-- Hold the orb to talk and let go to send. Slide off it to throw the recording away, and tap while glitch speaks to quiet it. The reply is typed out as it is spoken, with the full text below.
-- While a phone turn works, the page shows the agent's latest thought or working note under the status line. A muttered thought shows its Mandarin, with pinyin above each character, as it is spoken, and its English once it has been. The desk shows no text.
-- When a phone turn needs your permission, the page shows everything the tool would get (the whole command, a file's full new content, every field of any other tool) with Allow once and Deny. It waits up to 5 minutes, and desk requests queue behind it. If the page isn't open, a notification asks instead: Deny answers at once, a short one-line shell command can be allowed from it after unlock, and anything else opens the full card. Root prompts (pkexec) appear only at the desk.
-- Stop ends the running turn, whichever side started it. "new chat, …" starts fresh as at the desk and clears the page. The page also clears 15 minutes after the last turn, once it is off screen and the reply has been heard.
-- Away from home the page offers an Open Tailscale button. If you allow notifications, the phone tells you when glitch needs you or finished a reply you didn't hear.
+- Hold the orb to talk and let go to send. Slide off it to discard the recording, and tap while glitch speaks to quiet it.
+- While a turn works, the page shows the agent's latest thought. With the mutter on, it shows the Mandarin, with pinyin above each character, as it is spoken.
+- When a turn needs your permission, the page shows the tool's whole input with Allow once and Deny, and waits up to 5 minutes. If the page isn't open, a notification asks instead. Root prompts appear only at the desk.
+- Stop ends the running turn, whichever side started it, and "new chat, …" starts fresh
+- Away from home the page offers an Open Tailscale button. With notifications allowed, the phone tells you when glitch needs you or finished a reply you didn't hear.
 
-Settings and their defaults are in [config/glitch.conf](config/glitch.conf);
-override them in `~/.config/glitch/glitch.conf`. Your own `reactions.json` there
-merges over the default, and your own `voice-prompt.md` replaces it (agents
-pick it up at the start of a session, so try it with Super+Alt+D).
+`glitch unpair` forgets every phone, and `glitch phone --off` turns the portal off. If the address changes, set the new `PORTAL_ADDR` in `~/.config/glitch/glitch.conf`, run `glitch cert --renew` and `glitch phone`, install the new certificate, add the app to the home screen again and pair again.
 
-## How it works
+## Tech stack
+
+- **Desktop**: Omarchy 4 shell plugin (Quickshell, QML) on Hyprland
+- **Speech in**: voxtype (local Whisper)
+- **Speech out**: Piper
+- **Agent**: Claude Code or Codex, headless
+- **Orb**: one fragment shader, shared by the desk and the phone
+- **Orb's model**: Qwen3 1.7B on llama.cpp (TypeSafe's Jev or OpenAI with `MIND`)
+- **Phone**: Python HTTPS server, WebGL2 page, Web Push
+
+## Project structure
 
 ```
-Super+D ─► voxtype (local Whisper) ─► transcript ─► agent, headless, resuming the session
-                                                       │ tool steps, streamed words   │ reply ending in SAY: / MOOD:
-                                                       ▼                              ▼
-                       libexec/decide ─► reaction ─► orb      Piper speaks SAY · card holds the reply
-                       live signals (orb.events) ───► orb
+glitch/
+├── bin/glitch         # The pipeline: keys, sessions, agent adapters, approvals, speech, reply card
+├── plugin/
+│   ├── orb.mjs        # The orb's logic, shared with the phone
+│   ├── orb.glsl       # The orb's shader, shared with the phone
+│   └── Glitch.qml     # Hosts the orb in the Omarchy shell
+├── web/               # The phone portal's page and service worker
+├── libexec/
+│   ├── cue            # Beep synth
+│   ├── speak          # Piper voice
+│   ├── decide         # Picks the orb's reaction
+│   ├── mandarin       # Translates a thought for the mutter
+│   ├── portal         # The phone portal's HTTPS server
+│   ├── preview        # Cycles orb styles while you tune reactions.json
+│   └── desktop-root   # Desktop control's root half
+├── config/            # Defaults: glitch.conf, reactions.json, voice-prompt.md, desktop.md
+├── systemd/           # User units: glitch-mind, glitch-remote, glitch-portal
+├── hypr/glitch.lua    # Key bindings
+├── manifest.json      # Omarchy shell plugin manifest
+├── install.sh
+└── uninstall.sh
 ```
 
-- `bin/glitch`: the whole pipeline (keys, sessions, agent adapters, approvals,
-  speech, reply card). Its log is `$XDG_RUNTIME_DIR/glitch/glitch.log`.
-- `plugin/`: the orb. `orb.mjs` (its logic) and `orb.glsl` (its shader) are
-  shared with the phone; `Glitch.qml` hosts them in the Omarchy shell, taking
-  the reaction over IPC, live signals from `$XDG_RUNTIME_DIR/glitch/orb.events`
-  and the mic level from PipeWire.
-- `web/`: the phone portal's page, service worker and web host of the orb.
-- `libexec/`: `cue` (beeps), `speak` (Piper), `decide` (the decision model:
-  `local`, `jev` or `openai`), `mandarin` (translates a thought for the mutter), `preview`
-  (cycles orb styles while you tune `reactions.json`), `desktop-root` (desktop
-  control's root half), `portal` (the phone portal's HTTPS server).
-- `config/`: defaults, including the SAY/MOOD convention in `voice-prompt.md`.
+## Development
 
-install.sh symlinks the code into place, adds one `require` line to
-`~/.config/hypr/hyprland.lua`, installs ydotool with access to `/dev/uinput`
-(as root), and raises voxtype's recording cap (skip that with `--no-voxtype`,
-then set `RECORD_LIMIT` to voxtype's own cap). To work on glitch itself, read
-AGENTS.md.
+The log is `$XDG_RUNTIME_DIR/glitch/glitch.log`. To work on glitch itself, read [AGENTS.md](AGENTS.md).
+
+## License
+
+MIT, see [LICENSE](LICENSE).
 
 ## Credits
 
-The creature's patterns, palettes, motions and beep synth come from Beep Jev
-by Yohei Nakajima (ported from the public app's bundle); the decision approach
-follows his [glance](https://github.com/yoheinakajima/glance) and TypeSafe's Jev. This repo
-is private; check with him before publishing it.
+The creature's patterns, palettes, motions and beep synth come from Beep Jev by Yohei Nakajima (ported from the public app's bundle). The decision approach follows his [glance](https://github.com/yoheinakajima/glance) and TypeSafe's Jev.

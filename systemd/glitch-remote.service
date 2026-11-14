@@ -6,10 +6,7 @@ After=graphical-session.target
 ConditionEnvironment=WAYLAND_DISPLAY
 
 [Service]
-WorkingDirectory=%h/Work
-# env finds mise's claude wrapper (omarchy-agent-account-exec), which sets the
-# Claude home (CLAUDE_CONFIG_DIR, which glitch _reap reads) and execs the real binary. Never add --no-create-session-in-dir: it archives every session on stop.
-ExecStart=/usr/bin/env claude remote-control --spawn same-dir --chrome --permission-mode bypassPermissions
+ExecStart=%h/.local/bin/glitch _remote
 # The status screen redraws every second; keep only stderr
 StandardOutput=null
 StandardError=journal
@@ -17,6 +14,8 @@ StandardError=journal
 # minutes ("already served"), so keep retrying.
 Restart=always
 RestartSec=30
+# glitch _remote exits 78 when REMOTE isn't 1 or WORKDIR is missing.
+RestartPreventExitStatus=78
 
 [Install]
 WantedBy=graphical-session.target
