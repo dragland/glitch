@@ -24,6 +24,11 @@ orb also moves with what is happening:
   context is (Claude only; Codex doesn't report it). All of it fades when the
   orb starts to speak.
 
+While it works, it also mutters: every so often one of the agent's thoughts is spoken
+in Mandarin, in a second voice. English is only ever the answer, so a voice mid-turn
+can't be mistaken for one, and it is listening practice. The local model translates it
+(so it needs `MIND=local`); an empty `MUTTER_VOICE` turns it off.
+
 ## Install
 
 ```bash
@@ -97,6 +102,7 @@ the phone answers only on the phone. It runs while you're logged in at the desk.
 
 If the address changes, run `glitch cert --renew` and install the new CA file on the phone. After a new address or `PORTAL_PORT`, re-run `./install.sh`, add the app to the home screen again and pair it again. `glitch unpair` forgets every phone.
 
+- While a phone turn works, the page lists the agent's thoughts and working notes under the status line, newest first. A muttered thought shows its Mandarin and pinyin as it is spoken and its English once it has been. The desk shows no text.
 - Hold the orb to talk and let go to send. Slide off it to throw the recording away, and tap while glitch speaks to quiet it. The reply is typed out as it is spoken, with the full text below.
 - When a phone turn needs your permission, the page shows everything the tool would get (the whole command, a file's full new content, every field of any other tool) with Allow once and Deny. It waits up to 5 minutes, and desk requests queue behind it. If the page isn't open, a notification asks instead: Deny answers at once, a short one-line shell command can be allowed from it after unlock, and anything else opens the full card. Root prompts (pkexec) appear only at the desk.
 - Stop ends the running turn, whichever side started it. "new chat, …" starts fresh as at the desk and clears the page. The page also clears 15 minutes after the last turn, once it is off screen and the reply has been heard.
@@ -125,8 +131,8 @@ Super+D ─► voxtype (local Whisper) ─► transcript ─► agent, headless,
   and the mic level from PipeWire.
 - `web/`: the phone portal's page, service worker and web host of the orb.
 - `libexec/`: `cue` (beeps), `speak` (Piper), `decide` (the decision model:
-  `local`, `jev` or `openai`), `preview` (cycles orb styles while you tune
-  `reactions.json`), `desktop-root` (desktop control's root half), `portal`
+  `local`, `jev` or `openai`), `mandarin` (a thought's Mandarin line and pinyin, for
+  the mutter), `preview` (cycles orb styles while you tune `reactions.json`), `desktop-root` (desktop control's root half), `portal`
   (the phone portal's HTTPS server).
 - `config/`: defaults, including the SAY/MOOD convention in `voice-prompt.md`.
 
