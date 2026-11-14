@@ -165,6 +165,7 @@ const shownReply = () =>
 let saidFor = "", lineFor = null, moreFor = null
 
 function render() {
+  if (document.hidden && !playing && es) leave()
   if (update()) return
   const a = offline ? null : approvals[0], busy = !!turn || local === "listening"
   awayEl.hidden = !offline
@@ -520,10 +521,7 @@ const LOST_MS = 3000, PROBE_MS = 3000
 let es = null, lost = 0, probing = 0, synced, met = false
 
 function goOffline() {
-  clearTimeout(lost)
-  lost = 0
-  es?.close()
-  es = null
+  leave()
   if (!offline) {
     offline = true
     server = turn = null
@@ -531,6 +529,15 @@ function goOffline() {
     show()
   }
   probeSoon(PROBE_MS)
+}
+
+// Android keeps a hidden page's stream up for a while: closed, home sees no page and pushes.
+function leave() {
+  clearTimeout(lost)
+  lost = 0
+  clearTimeout(probing)
+  es?.close()
+  es = null
 }
 
 function probeSoon(ms) {
@@ -550,9 +557,7 @@ async function probe(asked = notice()) {
 }
 
 function reconnect() {
-  clearTimeout(lost)
-  lost = 0
-  es?.close()
+  leave()
   connect()
   probe()
 }
@@ -878,13 +883,7 @@ document.addEventListener("visibilitychange", () => {
     dropMic()
     orb.stop()
     if (lapsed) forget()
-    // Android keeps a hidden page's stream up for a while: closed, home sees no page and pushes.
-    interrupted()
-    clearTimeout(lost)
-    lost = 0
-    clearTimeout(probing)
-    es?.close()
-    es = null
+    render()
   } else {
     if (ran) unlock()
     orb.start()

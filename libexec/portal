@@ -117,8 +117,8 @@ Push. Pushes carry no payload, so the service worker asks GET /api/notice what t
 Each goes to every device with an endpoint. due() pushes "needs" once an approval has
 waited NEED_AFTER s, "settled" when one it pushed for ends unanswered (timed out, or its
 turn ended), and "finished" when a reply's speech goes unplayed: no page for UNHEARD_AFTER s,
-or a page that didn't play it within its length + 5 s. A hidden page closes its stream, so it
-counts as no page; it opens a new one each time it is shown.
+or a page that didn't play it within its length + 5 s. A hidden page closes its stream once the clip
+it is playing ends, so it counts as no page; it opens a new one each time it is shown.
 """
 
 import argparse
