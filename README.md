@@ -38,7 +38,7 @@ git clone git@github.com:dragland/glitch.git ~/glitch
 
 Needs Omarchy 4 with voxtype dictation (`omarchy-voxtype-install`) and Claude
 Code or Codex. Root once, for desktop control (`--no-desktop` skips it).
-Downloads (~1.3 GB, pinned in install.sh) go to `~/.local/share/glitch`;
+Downloads (~1.5 GB, pinned in install.sh) go to `~/.local/share/glitch`;
 `--no-mind` skips the local model.
 
 Update with `git pull && ./install.sh`; remove with `./uninstall.sh`

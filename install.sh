@@ -30,10 +30,13 @@ VOICE=en_US-kristin-medium
 VOICE_URL="https://huggingface.co/rhasspy/piper-voices/resolve/c10ece1aade47bb51c153c893d14e5bf8e5b7117/en/en_US/kristin/medium/$VOICE"
 VOICE_SHA=5849957f929cbf720c258f8458692d6103fff2f0e3d3b19c8259474bb06a18d4
 VOICE_JSON_SHA=5681426d4aead22195de70531eeeeddb46493cfaffc5764b2ea3db73428b651c
-MUTTER=zh_CN-huayan-medium
-MUTTER_URL="https://huggingface.co/rhasspy/piper-voices/resolve/c10ece1aade47bb51c153c893d14e5bf8e5b7117/zh/zh_CN/huayan/medium/$MUTTER"
-MUTTER_SHA=9929917bf8cabb26fd528ea44d3a6699c11e87317a14765312420be230be0f3d
-MUTTER_JSON_SHA=d521dc45504a8ccc99e325822b35946dd701840bfb07e3dbb31a40929ed6a82b
+MUTTER=zh_CN-xiao_ya-medium
+MUTTER_URL="https://huggingface.co/rhasspy/piper-voices/resolve/c10ece1aade47bb51c153c893d14e5bf8e5b7117/zh/zh_CN/xiao_ya/medium/$MUTTER"
+MUTTER_SHA=cb2ce4ca1f5a36a7b23ae48f0651ce2c854c331ef7a804e5c5dc643d0f74f0e2
+MUTTER_JSON_SHA=e1ec027b7065959643c1463705398d413ed4fdaa626d7d8ef1d12ab87e9a0320
+# g2pW picks each character's reading for the Mandarin voice. Piper loads its config.py as code.
+G2PW_URL="https://huggingface.co/datasets/rhasspy/piper-checkpoints/resolve/005db054ce8f013d8213b7dd4b0917de3c9347fe/zh/zh_CN/_resources/g2pw.tar.gz"
+G2PW_SHA=252c6f561c11014fbb243d70aec993a816d82109887b91edcda0261ab9967060
 
 with_mind=1
 tweak_voxtype=1
@@ -109,6 +112,17 @@ fetch "$VOICE_URL.onnx" "$DATA/voices/$VOICE.onnx" "$VOICE_SHA"
 fetch "$VOICE_URL.onnx.json" "$DATA/voices/$VOICE.onnx.json" "$VOICE_JSON_SHA"
 fetch "$MUTTER_URL.onnx" "$DATA/voices/$MUTTER.onnx" "$MUTTER_SHA"
 fetch "$MUTTER_URL.onnx.json" "$DATA/voices/$MUTTER.onnx.json" "$MUTTER_JSON_SHA"
+if [[ $(cat "$DATA/voices/g2pW/SHA" 2>/dev/null) != "$G2PW_SHA" ]]; then
+  fetch "$G2PW_URL" "$DATA/voices/g2pw.tar.gz" "$G2PW_SHA"
+  rm -rf "$DATA/voices/g2pW.new"
+  mkdir "$DATA/voices/g2pW.new"
+  tar xzf "$DATA/voices/g2pw.tar.gz" -C "$DATA/voices/g2pW.new"
+  echo "$G2PW_SHA" >"$DATA/voices/g2pW.new/SHA"
+  rm -rf "$DATA/voices/g2pW"
+  mv "$DATA/voices/g2pW.new" "$DATA/voices/g2pW"
+  rm -f "$DATA/voices/g2pw.tar.gz"
+fi
+ok "have ~/.local/share/glitch/voices/g2pW"
 
 if ((with_mind)); then
   step "Mind (llama.cpp $LLAMA_BUILD + $MODEL)"

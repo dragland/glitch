@@ -5,10 +5,13 @@ then wait on a FIFO for the line to say, synthesize it (~0.1-0.2 s) and exit.
     speak VOICE.onnx FIFO OUT.wav
 
 OUT.wav appears atomically, after OUT.env beside it: the line's loudness
-envelope ("<hz> <0..99> ..."), which the orb moves to while the wav plays.
+envelope ("<hz> <0..99> ..."), which the orb moves to while the wav plays. A Chinese
+voice also leaves OUT.ruby: the line as [text, pinyin] pairs, one per character with
+the reading the voice gave it, and "" for what has none.
 Empty input (or the FIFO closing unwritten) exits without output.
 """
 
+import json
 import math
 import os
 import sys
@@ -27,12 +30,31 @@ def envelope(path):
     top = sorted(rms)[int(len(rms) * 0.97)] if rms else 0
     return [min(99, int(99 * v / top)) if top else 0 for v in rms]
 
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")  # g2pW's tokenizer: no "PyTorch was not found" per line
+
 from piper import PiperVoice
+
+
+def ruby(voice, text):
+    """The readings come from the voice's own g2pW, so the pinyin shown is the pinyin
+    heard. _chinese_phonemizer is Piper 1.8's (set by the first synthesis)."""
+    from pypinyin.contrib.tone_convert import to_tone
+    out = []
+    for ch, syl in zip(text, voice._chinese_phonemizer.g2p(text)[0]):
+        if syl:
+            out.append([ch, to_tone(syl.replace("u:", "v"))])
+        elif out and not out[-1][1]:
+            out[-1][0] += ch
+        else:
+            out.append([ch, ""])
+    return out
 
 
 def main():
     model, fifo, out = sys.argv[1:4]
-    voice = PiperVoice.load(model)
+    # A Chinese voice reads characters with g2pW, which Piper looks for (and would
+    # download, unpinned) under download_dir; install.sh puts it beside the voices.
+    voice = PiperVoice.load(model, download_dir=os.path.dirname(os.path.abspath(model)))
     with open(fifo, encoding="utf-8", errors="replace") as f:
         text = f.read().strip()
     if not text:
@@ -40,7 +62,15 @@ def main():
     tmp = out + ".tmp"
     with wave.open(tmp, "wb") as w:
         voice.synthesize_wav(text, w)
-    env = os.path.splitext(out)[0] + ".env"
+    stem = os.path.splitext(out)[0]
+    if getattr(voice, "_chinese_phonemizer", None):
+        try:
+            with open(stem + ".ruby.tmp", "w", encoding="utf-8") as f:
+                json.dump(ruby(voice, text), f, ensure_ascii=False)
+            os.replace(stem + ".ruby.tmp", stem + ".ruby")
+        except (AttributeError, ImportError, IndexError, OSError, TypeError, ValueError) as e:
+            print(f"speak: no readings: {e}", file=sys.stderr)
+    env = stem + ".env"
     try:
         with open(env + ".tmp", "w") as f:
             f.write(" ".join(map(str, [ENV_HZ] + envelope(tmp))))
