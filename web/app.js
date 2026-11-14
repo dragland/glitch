@@ -11,7 +11,7 @@ const TAP_MS = 250, HANDOFF_MS = 30000, RELOAD_MS = 30000, ARM_MS = 400, UNHEARD
 const WORK = new Set(["thinking", "tool"])
 const ORB_Y_OF_HEIGHT = 0.33, ORB_RADIUS_STAGE_PX = 135, TALK_RADII = 1.5, DISCARD_RADII = 2
 const HEARD_S_PER_WORD = 0.025, SPOKEN_LEAD_S = 0.05, VOICED_LEVEL = 8, VOICE_GAP_S = 0.12, PAUSE_SNAP_S = 0.6
-const TRACE_SHOWN = 12
+const TRACE_SHOWN = 3
 const BUZZ = { start: 12, sent: [12, 70, 12], ask: [40, 80, 40, 80, 40], failed: [180] }
 
 let installer = null, booted = false, persisted = false
@@ -181,7 +181,7 @@ function render() {
   said(r || offline || local === "listening" || cleared || turn === "desk" ? "" : heard)
   if (r) line(r)
   else statusLine(status())
-  traced(r || offline || local === "listening" || cleared || turn === "desk" || note ? [] : trace)
+  traced(r || a || offline || local === "listening" || cleared || turn === "desk" ? [] : trace)
   hintEl.hidden = !r || unlocked || !queue.length
   more(r?.shown === "full" ? r.extra ??= extra(r) : "", r)
   edges(textEl)
@@ -212,36 +212,30 @@ function line(r) {
   else lineEl.textContent = text
 }
 
-// A zh entry (a thought muttered in Mandarin) shows its line once its clip starts and its
-// English once the clip has ended, so the text never runs ahead of the voice.
 function traced(list) {
   const rows = list.filter(t => t.kind !== "zh" || t.heard).slice(-TRACE_SHOWN).reverse()
   const key = rows.map(t => t.n + (t.heard || "")).join()
   traceEl.hidden = !rows.length
   if (key === traceFor) return
   traceFor = key
-  // Only a line that is new fades in.
-  const row = (t, text, cls) => {
-    const e = make("p", text, cls), k = `${t.n} ${cls}`
+  const row = (text, cls) => {
+    const e = make("p", text, cls), k = `${cls} ${text}`
     if (tracedRows.has(k)) e.style.animation = "none"
     tracedRows.add(k)
     return e
   }
   if (!rows.length) tracedRows.clear()
-  traceEl.replaceChildren(...rows.flatMap(t => t.kind !== "zh" ? [row(t, t.text, t.kind)]
-    : t.heard === "done" && !t.zh ? [row(t, t.text, "think")]
-    : [hanzi(t, row(t, t.ruby?.length ? "" : t.zh, "zh")), ...t.pinyin && !t.ruby?.length ? [row(t, t.pinyin, "py")] : [],
-       ...t.heard === "done" ? [row(t, t.text, "en")] : []]))
+  traceEl.replaceChildren(...rows.flatMap(t => t.kind !== "zh" ? [row(t.text, t.kind)]
+    : [hanzi(t, row(t.ruby?.length ? "" : t.zh, "zh")), ...t.heard === "done" ? [row(t.text, "en")] : []]))
 }
 const tracedRows = new Set()
 
-// Pinyin sits above each character, as in a reader.
 function hanzi(t, p) {
   p.lang = "zh-Hans"
   for (const [text, py] of t.ruby || []) {
     if (!py) { p.append(text); continue }
     const r = make("ruby", text)
-    r.append(make("rt", py))
+    r.append(Object.assign(make("rt", py), { lang: "zh-Latn-pinyin" }))
     p.append(r)
   }
   return p
@@ -468,6 +462,7 @@ function clip(c) {
     else if (c.kind !== "cue") api("/api/played", { id: c.id })
     return
   }
+  if (c.kind === "mutter" && (!unlocked || document.hidden || approvals.length)) return void muttered(c.id, "done")
   if (c.kind !== "cue" && c.kind !== "mutter") dropMutters()
   if (c.kind === "cue") {
     if (unlocked) started.set(c.id, load(c).then(b => { sound(b); return ac.currentTime }, () => null))
@@ -504,7 +499,7 @@ async function pump() {
   p.src = sound(buf, at)
   started.set(c.id, at)
   if (c.kind === "say" && reply && !reply.shown) speak(reply, at, c)
-  if (c.kind === "mutter") setTimeout(() => { if (playing === p) { muttered(c.id, "on"); render() } }, Math.max(0, (at - ac.currentTime) * 1000))
+  if (c.kind === "mutter") setTimeout(() => { if (playing === p) { muttered(c.id, "on"); render() } }, Math.max(0, (at - ac.currentTime + (ac.outputLatency || 0)) * 1000))
   const ms = (at - ac.currentTime + Math.max(0, (ac.outputLatency || 0) - SAY_LAG)) * 1000
   p.timer = setTimeout(() => { if (c.env) orb.event("say " + c.env) }, ms)
   p.src.onended = () => {

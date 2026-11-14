@@ -17,7 +17,8 @@
 #   glitch cert [--renew]  make the portal's certificate, and the CA file the phone installs
 #
 # Defaults in <repo>/config, overrides in ~/.config/glitch, downloads in
-# ~/.local/share/glitch, live state in $XDG_RUNTIME_DIR/glitch.
+# ~/.local/share/glitch, live state in $XDG_RUNTIME_DIR/glitch, the reply card's
+# record in ~/.local/state/glitch.
 
 set -uo pipefail
 export LC_CTYPE=${LC_CTYPE:-C.UTF-8} # string slicing below must count characters
@@ -26,8 +27,10 @@ GLITCH_HOME=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
 DATA="${XDG_DATA_HOME:-$HOME/.local/share}/glitch"
 USER_CONF="${XDG_CONFIG_HOME:-$HOME/.config}/glitch"
 RT="${XDG_RUNTIME_DIR:-/run/user/$UID}/glitch"
-STATE="${XDG_STATE_HOME:-$HOME/.local/state}/glitch"
 mkdir -p "$RT"
+# A scratch runtime keeps its card's record to itself.
+CARD="$RT/card"
+[[ $RT == "/run/user/$UID/glitch" ]] && CARD="${XDG_STATE_HOME:-$HOME/.local/state}/glitch/card"
 
 # shellcheck source=../config/glitch.conf
 . "$GLITCH_HOME/config/glitch.conf"
@@ -257,7 +260,7 @@ speech_warm() {
   rm -f "$SPEAK_SLOT.wav" "$SPEAK_SLOT.env" "$SPEAK_SLOT.ruby" "$SPEAK_SLOT.fifo"
   [[ $SPEAK == 1 && -x $PY && -f $VOICE ]] || return 0
   mkfifo "$SPEAK_SLOT.fifo" || return 0
-  "$PY" -I "$SPEAK_HELPER" "$VOICE" "$SPEAK_SLOT.fifo" "$SPEAK_SLOT.wav" </dev/null >/dev/null 2>>"$RT/glitch.log" 8>&- 9>&- &
+  "$PY" -I "$SPEAK_HELPER" "$VOICE" "$SPEAK_SLOT.fifo" "$SPEAK_SLOT.wav" </dev/null >/dev/null 2>>"$RT/glitch.log" 6>&- 8>&- 9>&- &
   SPEAK_PID=$!
 }
 
@@ -319,30 +322,27 @@ notify() {
     return 0
   }
   [[ $id =~ ^[0-9]+$ ]] && printf '%s' "$id" >"$RT/notify.id"
-  printf '%s' "$1" >"$RT/notify.summary"
-  mkdir -p "$STATE" && printf '%s\n%s\n' "$RT" "${1//$'\n'/ }" >"$STATE/card"
-}
-
-close_card() {
-  local summary
-  summary=$(cat "$RT/notify.summary" 2>/dev/null) || return 0
-  [[ -n $summary ]] && omarchy-shell -q notifications dismiss "$summary" >/dev/null 2>&1
-  rm -f "$RT/notify.id" "$RT/notify.summary"
-  [[ $(head -n 1 "$STATE/card" 2>/dev/null) == "$RT" ]] && rm -f "$STATE/card"
+  mkdir -p "${CARD%/*}" && printf '%s' "${1//$'\n'/ }" >"$CARD"
 }
 
 # The card is critical, so the shell never times it out and restores it after a
-# restart, while a reboot or logout empties $RT and kills expire_later's timer.
-# $STATE/card ("<RT>\n<summary>") outlives both. Every run checks it; the reap timer
-# makes that at most 15 minutes. The record stays until the shell answers.
+# restart, while a reboot or logout empties $RT and kills expire_later's timer. $CARD
+# (the card's summary) outlives both, and goes only once the shell has answered.
+close_card() {
+  local summary answer
+  summary=$(cat "$CARD" 2>/dev/null) || return 0
+  if [[ -n $summary ]]; then
+    answer=$(omarchy-shell notifications dismiss "$summary" 2>/dev/null)
+    # A shell that has just started says "none" until it has restored its cards.
+    [[ $answer == ok || ($answer == none && $(ps -o etimes= -C quickshell | sort -n | tail -n 1) -ge 30) ]] || return 1
+  fi
+  rm -f "$RT/notify.id" "$CARD"
+}
+
 card_sweep() {
-  local rt summary
-  { IFS= read -r rt && IFS= read -r summary; } 2>/dev/null <"$STATE/card" || return 0
-  [[ $rt == "$RT" && -z $(turn_portal) ]] || return 0
-  [[ -e $RT/notify.summary ]] && ((EPOCHSECONDS - $(stat -c %Y "$RT/sid" 2>/dev/null || echo 0) < RESUME_WINDOW + 60)) && return 0
-  [[ $(omarchy-shell notifications dismiss "$summary" 2>/dev/null) =~ ^(ok|none)$ ]] || return 0
-  log "card swept: $summary"
-  rm -f "$RT/notify.id" "$RT/notify.summary" "$STATE/card"
+  [[ -e $CARD && -z $(turn_portal) ]] || return 0
+  [[ -e $RT/notify.id ]] && ((EPOCHSECONDS - $(stat -c %Y "$RT/sid" 2>/dev/null || echo 0) < RESUME_WINDOW + 60)) && return 0
+  close_card && log "card swept"
 }
 
 expire_later() {
@@ -400,72 +400,87 @@ stop_live() {
 }
 
 # --- the trace and the mutter ----------------------------------------------------------
-# The phone shows the agent's thoughts and working notes during a turn; the desk shows
-# none. With MUTTER_VOICE set, a thought is also spoken in Mandarin every MUTTER_EVERY
-# seconds: speech in another language can't be taken for the reply.
 
-TRACE_JQ='def shown: tostring | gsub("\\s*\n\\s*"; "\n") | sub("^\\s+"; "") | sub("\\s+$"; "") | .[0:800];'
+# shown: a thought or a note as the phone lists it. The cut comes first: the patterns
+# are quadratic in a long run of spaces.
+# shellcheck disable=SC2016 # jq, not bash
+TRACE_JQ='def shown: tostring | .[0:4000] | [splits("\n") | select(test("^\\s*(SAY|MOOD):") | not)] | join("\n")
+  | gsub("\\*\\*|`"; "") | gsub("\\s*\n\\s*"; "\n") | sub("^\\s+"; "") | sub("\\s+$"; "") | clip(400);'
 
 # trace KIND JSON-STRING
 trace() {
   [[ $PORTAL == phone ]] || return 0
-  phone_send "$(jq -c --arg k "$1" "$TRACE_JQ"'{type:"trace", kind:$k, text:shown}' <<<"$2" 2>/dev/null)"
+  phone_send "$(jq -c --arg k "$1" "$JQ_DEFS$TRACE_JQ"'{type:"trace", kind:$k, text:shown} | select(.text != "")' <<<"$2" 2>/dev/null)"
 }
 
-# Fails when it leaves the thought unspoken. One it takes reaches the phone's trace from
-# cmd_mutter, with the Mandarin, so its English can wait for the voice.
+working() {
+  [[ -e $RT/turn.pid ]] && ! recording && [[ $(jq -r .state "$(state_file)" 2>/dev/null) =~ ^(thinking|tool)$ ]]
+}
+
+# mutter THOUGHT-JSON. Fails when it leaves the thought to the caller.
 mutter() {
   [[ $SPEAK == 1 && -x $PY && -n $MUTTER_VOICE && -f $MUTTER_VOICE ]] || return 1
-  ((EPOCHSECONDS - ${LAST_MUTTER:-0} >= MUTTER_EVERY)) && ! recording || return 1
+  ((EPOCHSECONDS - LAST_MUTTER >= MUTTER_EVERY)) && working || return 1
+  [[ $PORTAL == desk ]] || page_online || return 1
   LAST_MUTTER=$EPOCHSECONDS
-  "$0" _mutter "$1" </dev/null >/dev/null 2>>"$RT/glitch.log" 8>&- 9>&- &
+  "$0" _mutter <<<"$1" >/dev/null 2>>"$RT/glitch.log" 8>&- 9>&- &
 }
 
-# Not setsid: cancel ends the turn's whole session, and this with it. A thought it
-# couldn't speak goes to the trace as plain text.
+# Not setsid: cancel ends the turn's whole session, and this with it. The thought
+# comes on stdin, since one argument holds 128 KiB at most.
 cmd_mutter() {
-  MUTTERED=""
-  mutter_once "$1"
-  [[ -n $MUTTERED ]] || trace think "$1"
+  THOUGHT=$(cat)
+  exec 6>"$RT/mutter.lock"
+  if flock -n 6; then
+    echo $$ >"$RT/mutter.pid"
+    # stop_mutter ends this with TERM, and bash runs the trap once the child it waits on is gone.
+    trap 'trace think "$THOUGHT"; exit 0' TERM
+    mutter_once && return 0
+    trap - TERM
+  fi
+  trace think "$THOUGHT"
 }
 
+# Children close fd 6, or one that outlives a stop would keep mutter.lock.
 mutter_once() {
-  local out zh id
-  exec 6>"$RT/mutter.lock"
-  flock -n 6 || return 0
-  echo $$ >"$RT/mutter.pid"
-  out=$(jq -r . <<<"$1" | "$PY" -I "$GLITCH_HOME/libexec/mandarin" 2>>"$RT/glitch.log")
-  zh=$(jq -r '.zh // ""' <<<"$out" 2>/dev/null)
-  [[ -n $zh ]] || return 0
-  log "mutter $out"
+  local zh id event rest ruby
+  jq -r . <<<"$THOUGHT" | "$PY" -I "$GLITCH_HOME/libexec/mandarin" >"$RT/mutter.json" 2>>"$RT/glitch.log" 6>&-
+  zh=$(jq -r '.zh // ""' "$RT/mutter.json" 2>/dev/null)
+  [[ -n $zh ]] || return 1
+  log "mutter $zh"
   VOICE=$MUTTER_VOICE speech_warm mutter
   speech_render "$zh"
-  [[ -s $RT/mutter.wav && -e $RT/turn.pid ]] && ! recording || return 0
-  # The voice's own readings, when it left them, replace libexec/mandarin's.
-  [[ -s $RT/mutter.ruby ]] && out=$(jq -c --slurpfile r "$RT/mutter.ruby" '.ruby = $r[0]
-    | .pinyin = ([.ruby[] | if .[1] != "" then .[1] else .[0] | gsub("\\s"; "") end | select(. != "")] | join(" "))' <<<"$out" || echo "$out")
+  [[ -s $RT/mutter.wav ]] && working || return 1
   if [[ $PORTAL == phone ]]; then
     id="${EPOCHREALTIME/./}-mutter.wav"
-    cp "$RT/mutter.wav" "$PH/clips/$id" || return 0
-    phone_send "$(jq -c --arg id "$id" --argjson all "$1" "$TRACE_JQ"'{type:"trace", kind:"zh", text:($all | shown), zh, pinyin, ruby, clip:$id}' <<<"$out")" || return 0
-    MUTTERED=1
+    cp "$RT/mutter.wav" "$PH/clips/$id" || return 1
+    ruby=$(cat "$RT/mutter.ruby" 2>/dev/null)
+    event=$(jq -c --arg id "$id" --argjson ruby "${ruby:-[]}" '{type:"trace", kind:"zh", text:.en, zh, ruby:$ruby, clip:$id}' "$RT/mutter.json") || return 1
+    rest=$(jq -c '.rest | select(. != "")' "$RT/mutter.json")
+    trap - TERM
+    [[ -n $rest ]] && trace think "$rest"
+    phone_send "$event"
     clip_sent mutter "$id" "$(cat "$RT/mutter.env" 2>/dev/null)"
-    sleep $(((CLIP_MS + 999) / 1000))
+    sleep $(((CLIP_MS + 999) / 1000)) 6>&-
   else
-    MUTTERED=1
+    trap - TERM
     [[ -s $RT/mutter.env ]] && ev "say $(<"$RT/mutter.env")"
-    pw-play --volume "$MUTTER_VOLUME" "$RT/mutter.wav" 2>/dev/null
+    pw-play --volume "$MUTTER_VOLUME" "$RT/mutter.wav" 2>/dev/null 6>&-
   fi
 }
 
-# The phone page drops its own mutter when a reply, an approval or a recording starts.
+# One kill can miss a mutter that is just starting, so mutter_once also asks `working`
+# before it plays. The phone page drops its own mutter clip.
 stop_mutter() {
-  local pid
+  local pid kids playing=""
   pid=$(cat "$RT/mutter.pid" 2>/dev/null) || return 0
   rm -f "$RT/mutter.pid"
   grep -qs _mutter "/proc/$pid/cmdline" || return 0
-  pkill -P "$pid" 2>/dev/null && [[ $PORTAL == desk ]] && ev hush
-  kill "$pid" 2>/dev/null
+  pgrep -P "$pid" -x pw-play >/dev/null && playing=1
+  kids=$(pgrep -P "$pid")
+  # shellcheck disable=SC2086 # one pid per word
+  kill "$pid" $kids 2>/dev/null
+  [[ -n $playing ]] && PORTAL=desk ev hush
 }
 
 # --- agent adapters ---------------------------------------------------------------
@@ -475,8 +490,7 @@ stop_mutter() {
 # window>", "say <text>", "mood <word>", "result <json string>", "error <text>",
 # "think <json string>", "note <json string>", "denied <n>", then "exit <status>" last.
 # `think` is a whole thought (a summary of the agent's reasoning) and `note` a whole
-# message it wrote; a note followed by a tool call is a working note, and the last one
-# is the reply. Tool categories: look, make, run,
+# message it wrote. Tool categories: look, make, run,
 # delegate. The phrase is the phone's status line (jq `status`). A subagent's own
 # tool calls are dropped. `toolend` comes when the call's work is done, which for a
 # background subagent is later than its tool result. `ctx` and `window` are Claude's
@@ -496,7 +510,8 @@ adapter_claude() {
     --append-system-prompt "$(voice_prompt)")
   [[ -n $sid ]] && args+=(--resume "$sid")
   # stream-json requires --verbose. SIGINT ends a turn cleanly (SIGTERM leaves
-  # it unrecorded). -p hides thinking unless --thinking-display asks for its summaries.
+  # it unrecorded). -p hides thinking unless --thinking-display asks for its summaries
+  # (a flag that `claude --help` doesn't list: re-check it when Claude changes).
   timeout --signal=INT --kill-after=15 "$TURN_TIMEOUT" claude "${args[@]}" 2>>"$RT/glitch.log" 9>&- |
     jq --unbuffered -rR "$JQ_DEFS"'fromjson? // empty |
     def tlabel: .name + (
@@ -663,9 +678,9 @@ cmd_start() {
     return
   fi
   [[ ${1:-} == --new ]] && touch "$RT/force-new"
-  stop_mutter
   stamp=${EPOCHREALTIME/./}
   printf '%s' "$stamp" >"$RT/recording"
+  stop_mutter
   voxtype record start --file="$RT/utterance.txt" --no-osd 2>>"$RT/glitch.log"
   REACTION=$(reaction listening)
   set_state listening
@@ -781,6 +796,7 @@ cmd_turn() {
   ev turn
   [[ -z $SID || $agent != claude ]] && ev "ctx 0"
   speech_warm
+  LAST_MUTTER=$EPOCHSECONDS
   REACTION=$(reaction thinking)
   set_state thinking "$text" thinking
   live_decide "$text" "" ""
@@ -825,10 +841,12 @@ cmd_turn() {
         last_decide=$EPOCHSECONDS
       fi
       ;;
-    think)
-      mutter "$rest" || trace think "$rest"
+    think) mutter "$rest" || trace think "$rest" ;;
+    # A message is a working note unless it is the last one, which is the reply.
+    note)
+      [[ -n $note ]] && trace note "$note"
+      note=$rest
       ;;
-    note) note=$rest ;;
     denied) denied=$rest ;;
     mood) mood=$rest ;;
     say) say=$rest replied=true ;;
@@ -1242,7 +1260,7 @@ unpair) cmd_unpair ;;
 portal) cmd_portal ;;
 cert) cmd_cert "${2:-}" ;;
 _live) cmd_live ;;
-_mutter) cmd_mutter "$2" ;;
+_mutter) cmd_mutter ;;
 _expire) cmd_expire ;;
 _approve) cmd_approve ;;
 _reap) cmd_reap ;;

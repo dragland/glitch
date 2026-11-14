@@ -10,7 +10,7 @@
 #   ./install.sh --no-desktop    skip desktop control (agents' clicks and keys)
 #
 # Only desktop control needs root, once (ydotool and /dev/uinput). Downloads
-# (~1.3 GB with the mind) go to ~/.local/share/glitch, pinned and checksummed
+# (~1.5 GB with the mind) go to ~/.local/share/glitch, pinned and checksummed
 # in this file.
 
 set -euo pipefail
@@ -34,9 +34,14 @@ MUTTER=zh_CN-xiao_ya-medium
 MUTTER_URL="https://huggingface.co/rhasspy/piper-voices/resolve/c10ece1aade47bb51c153c893d14e5bf8e5b7117/zh/zh_CN/xiao_ya/medium/$MUTTER"
 MUTTER_SHA=cb2ce4ca1f5a36a7b23ae48f0651ce2c854c331ef7a804e5c5dc643d0f74f0e2
 MUTTER_JSON_SHA=e1ec027b7065959643c1463705398d413ed4fdaa626d7d8ef1d12ab87e9a0320
-# g2pW picks each character's reading for the Mandarin voice. Piper loads its config.py as code.
+# g2pW picks each character's reading for the Mandarin voice. Piper loads its config.py
+# as code, and takes from it the name of a tokenizer that transformers would fetch from
+# huggingface.co the first time a line is spoken.
 G2PW_URL="https://huggingface.co/datasets/rhasspy/piper-checkpoints/resolve/005db054ce8f013d8213b7dd4b0917de3c9347fe/zh/zh_CN/_resources/g2pw.tar.gz"
 G2PW_SHA=252c6f561c11014fbb243d70aec993a816d82109887b91edcda0261ab9967060
+BERT_URL="https://huggingface.co/google-bert/bert-base-chinese/resolve/8f23c25b06e129b6c986331a13d8d025a92cf0ea"
+BERT_VOCAB_SHA=45bbac6b341c319adc98a532532882e91a9cefc0329aa57bac9ae761c27b291c
+BERT_CONFIG_SHA=0f6d13e6f4da6f9e24f22ada6bc3be571123d858d7c0c05a8a7cd55a9c23c2e8
 
 with_mind=1
 tweak_voxtype=1
@@ -110,19 +115,6 @@ step "Voice"
 mkdir -p "$DATA/voices"
 fetch "$VOICE_URL.onnx" "$DATA/voices/$VOICE.onnx" "$VOICE_SHA"
 fetch "$VOICE_URL.onnx.json" "$DATA/voices/$VOICE.onnx.json" "$VOICE_JSON_SHA"
-fetch "$MUTTER_URL.onnx" "$DATA/voices/$MUTTER.onnx" "$MUTTER_SHA"
-fetch "$MUTTER_URL.onnx.json" "$DATA/voices/$MUTTER.onnx.json" "$MUTTER_JSON_SHA"
-if [[ $(cat "$DATA/voices/g2pW/SHA" 2>/dev/null) != "$G2PW_SHA" ]]; then
-  fetch "$G2PW_URL" "$DATA/voices/g2pw.tar.gz" "$G2PW_SHA"
-  rm -rf "$DATA/voices/g2pW.new"
-  mkdir "$DATA/voices/g2pW.new"
-  tar xzf "$DATA/voices/g2pw.tar.gz" -C "$DATA/voices/g2pW.new"
-  echo "$G2PW_SHA" >"$DATA/voices/g2pW.new/SHA"
-  rm -rf "$DATA/voices/g2pW"
-  mv "$DATA/voices/g2pW.new" "$DATA/voices/g2pW"
-  rm -f "$DATA/voices/g2pw.tar.gz"
-fi
-ok "have ~/.local/share/glitch/voices/g2pW"
 
 if ((with_mind)); then
   step "Mind (llama.cpp $LLAMA_BUILD + $MODEL)"
@@ -139,6 +131,28 @@ if ((with_mind)); then
   fi
   ok "have llama.cpp $LLAMA_BUILD"
   fetch "$MODEL_URL" "$DATA/models/$MODEL" "$MODEL_SHA"
+
+  step "Mutter (Mandarin voice; the mind translates for it)"
+  # g2pW goes in whole and before the voice: with the voice here and g2pW not, Piper
+  # would download its own, unpinned.
+  g2pw="$DATA/voices/g2pW"
+  if [[ $(cat "$g2pw/SHA" 2>/dev/null) != "$G2PW_SHA $BERT_VOCAB_SHA" ]]; then
+    fetch "$G2PW_URL" "$DATA/voices/g2pw.tar.gz" "$G2PW_SHA"
+    rm -rf "$g2pw.new"
+    mkdir -p "$g2pw.new/bert-base-chinese"
+    tar xzf "$DATA/voices/g2pw.tar.gz" -C "$g2pw.new"
+    fetch "$BERT_URL/vocab.txt" "$g2pw.new/bert-base-chinese/vocab.txt" "$BERT_VOCAB_SHA"
+    fetch "$BERT_URL/tokenizer_config.json" "$g2pw.new/bert-base-chinese/tokenizer_config.json" "$BERT_CONFIG_SHA"
+    sed -i "s|^model_source = .*|model_source = '$g2pw/bert-base-chinese'|" "$g2pw.new/config.py"
+    grep -qxF "model_source = '$g2pw/bert-base-chinese'" "$g2pw.new/config.py" || die "g2pW's config.py has no model_source line"
+    echo "$G2PW_SHA $BERT_VOCAB_SHA" >"$g2pw.new/SHA"
+    rm -rf "$g2pw"
+    mv "$g2pw.new" "$g2pw"
+    rm -f "$DATA/voices/g2pw.tar.gz"
+  fi
+  ok "have ${g2pw/#$HOME/~}"
+  fetch "$MUTTER_URL.onnx" "$DATA/voices/$MUTTER.onnx" "$MUTTER_SHA"
+  fetch "$MUTTER_URL.onnx.json" "$DATA/voices/$MUTTER.onnx.json" "$MUTTER_JSON_SHA"
   if [[ ! -s $DATA/mind.key ]]; then
     (umask 077 && head -c 24 /dev/urandom | base64 | tr -d '/+=' >"$DATA/mind.key")
     ok "created an API key for glitch-mind"
