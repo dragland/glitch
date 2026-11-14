@@ -16,7 +16,7 @@ let installer = null, booted = false, persisted = false
 let reactions = {}, offline = false, shell = null, stale = false
 let server = null, local = null, turn = null, approvals = []
 let heard = "", reply = null, note = "", awaiting = 0, offering = false
-let cleared = false, typeHeard = false, since = 0, armed = 0
+let cleared = false, typeHeard = false, since = 0, armed = 0, lapsed = false
 let orb
 
 // Chrome fires beforeinstallprompt once per page load, possibly during the first await below.
@@ -422,7 +422,7 @@ function clip(c) {
 
 async function pump() {
   if (!unlocked) render()
-  if (playing || !queue.length || !unlocked) return
+  if (playing || !queue.length || !unlocked || document.hidden) return
   const c = queue.shift(), p = playing = { c }
   let buf, cue
   try { [buf, cue] = await Promise.all([load(c), c.with && started.get(c.with)]) } catch {
@@ -471,6 +471,15 @@ function interrupted() {
   orb.event("hush")
 }
 
+function forget() {
+  lapsed = false
+  heard = note = ""
+  setReply(null)
+  server = null
+  hush(false)
+  if (!local) show()
+}
+
 function hush(ack) {
   if (reply) full(reply)
   if (!playing && !queue.length) return
@@ -508,7 +517,7 @@ denyEl.addEventListener("click", () => { if (performance.now() >= armed) answer(
 stopEl.addEventListener("click", () => { unlock(); api("/api/cancel").catch(() => {}) })
 
 const LOST_MS = 3000, PROBE_MS = 3000
-let es = null, lost = 0, probing = 0, synced = false, met = false
+let es = null, lost = 0, probing = 0, synced, met = false
 
 function goOffline() {
   clearTimeout(lost)
@@ -532,13 +541,24 @@ function probeSoon(ms) {
 async function probe(asked = notice()) {
   clearTimeout(probing)
   const r = await asked
+  if (document.hidden) return
   if (r?.status === 401) return pair()
-  if (r?.ok) { if (!es) connect() }
-  else if (!met) goOffline()
-  else if (offline || !es) probeSoon(PROBE_MS)
+  const open = es?.readyState === EventSource.OPEN
+  if (r?.ok) { if (!es || (lost && !open)) { es?.close(); connect() } }
+  else if (!met || offline) goOffline()
+  else if (!open) { lost ||= setTimeout(goOffline, LOST_MS); probeSoon(500) }
+}
+
+function reconnect() {
+  clearTimeout(lost)
+  lost = 0
+  es?.close()
+  connect()
+  probe()
 }
 
 function connect() {
+  if (document.hidden) return
   const me = es = new EventSource("/api/events")
   const on = (type, fn) => me.addEventListener(type, e => { fn(JSON.parse(e.data)); render() })
   on("hello", h => {
@@ -547,14 +567,25 @@ function connect() {
     offline = false
     met = true
     if (!persisted) { persisted = true; navigator.storage?.persist?.().catch(() => {}) }
-    if (!synced && globalThis.Notification?.permission === "granted") { synced = true; subscribe().catch(() => {}) }
+    if (synced !== globalThis.Notification?.permission) {
+      if (synced === undefined && !h.turn && canOffer()) offering = true
+      sync("open")
+    }
     turn = h.turn
     if (turn === "phone") since ||= Date.now()
-    server = h.state || null
+    else if (!turn) orb.event("rest")
     approvals = (h.approve || []).map(received)
-    heard = h.heard || ""
-    setReply(h.reply, (h.replay || []).some(c => c.kind === "say"))
-    for (const c of h.replay || []) clip(c)
+    const replay = h.replay || []
+    if (!(lapsed && !h.heard && !h.reply)) {
+      lapsed = false
+      server = h.state || null
+      heard = h.heard || ""
+      setReply(h.reply, replay.some(c => c.kind === "say"))
+    }
+    if (playing && !replay.some(x => x.id === playing.c.id)) { stop(playing); playing = null; orb.event("hush") }
+    queue = queue.filter(c => replay.some(x => x.id === c.id))
+    for (const c of replay) clip(c)
+    pump()
     if (!local) show()
     opened()
   })
@@ -581,6 +612,11 @@ function connect() {
     cleared = false
     typeHeard = true
     since = Date.now()
+    lapsed = false
+  })
+  on("fresh", m => {
+    if (m.idle && !document.hidden) lapsed = true
+    else forget()
   })
   on("reply", m => {
     setReply(m, true)
@@ -626,7 +662,7 @@ async function opened() {
 }
 
 function update() {
-  if (!stale || turn || local || press || playing || queue.length || approvals.length || WORK.has(server?.state)) return false
+  if (!stale || document.hidden || turn || local || press || playing || queue.length || approvals.length || WORK.has(server?.state)) return false
   if (typers.size || textEl.scrollTop > 0) return false
   if (Date.now() - (+sessionStorage.getItem("glitch.reload") || 0) < RELOAD_MS) return false
   sessionStorage.setItem("glitch.reload", Date.now())
@@ -639,22 +675,39 @@ const bytes = b64 => Uint8Array.from(atob(b64.replace(/-/g, "+").replace(/_/g, "
 async function subscribe() {
   const reg = await navigator.serviceWorker.ready
   const r = await fetch("/api/push")
-  if (!r.ok) return
+  if (!r.ok) throw new Error(`key ${r.status}`)
   const key = bytes((await r.json()).key)
   let sub = await reg.pushManager.getSubscription()
   const old = sub && new Uint8Array(sub.options.applicationServerKey || [])
   // PushManager refuses to subscribe with a different key while an old subscription exists.
   if (sub && old.join() !== key.join()) { await sub.unsubscribe(); sub = null }
   sub ||= await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key })
-  await api("/api/push", { endpoint: sub.endpoint })
+  const sent = await api("/api/push", { endpoint: sub.endpoint })
+  if (!sent.ok) throw new Error(`endpoint ${sent.status}`)
+}
+
+async function sync(when, asked) {
+  const perm = synced = globalThis.Notification?.permission
+  let why = `permission ${perm}`, failed = false
+  if (perm === "granted") try { return await subscribe() } catch (e) { failed = true; synced = null; why = `${e.name}: ${e.message}` }
+  const said = localStorage.getItem("glitch.push")
+  if (said === "no" && !failed && !asked) return
+  const app = matchMedia("(display-mode: standalone)").matches ? "app" : "tab"
+  const note = `${when}: ${why}; ${asked ? `asked ${asked}; ` : ""}said ${said}; ${app}; worker ${!!navigator.serviceWorker?.controller}`
+  api("/api/push", failed ? { note } : { endpoint: null, note }).catch(() => {})
 }
 
 yesEl.addEventListener("click", async () => {
   offering = false
   render()
-  if (await Notification.requestPermission() === "granted") subscribe().catch(() => {})
-  else localStorage.setItem("glitch.push", "no")
+  const got = await Notification.requestPermission().catch(e => `${e.name}: ${e.message}`)
+  // Chrome on Android resolves "default" when its prompt goes unanswered.
+  if (got === "default") { offering = true; render() }
+  sync("yes", got)
 })
+// Chrome's site controls can grant or take back notifications with no prompt from the page.
+let watched
+navigator.permissions?.query({ name: "notifications" }).then(p => { watched = p; p.onchange = () => sync(`now ${p.state}`) }, () => {})
 noEl.addEventListener("click", () => {
   offering = false
   localStorage.setItem("glitch.push", "no")
@@ -723,13 +776,13 @@ canvas.addEventListener("pointerdown", e => {
   const first = !unlocked
   unlock()
   note = ""
-  if (first && queue.length) { press = { id: e.pointerId }; return }
+  const p = press = { id: e.pointerId }, t = performance.now()
+  const talk = () => { p.t = t; hush(true); record(p) }
+  if (first && queue.length) { p.timer = setTimeout(() => { talk(); begin(p) }, TAP_MS); return }
   const speaking = !!(playing || queue.length)
-  hush(true)
-  const p = press = { id: e.pointerId, t: performance.now() }
+  talk()
   if (speaking) p.timer = setTimeout(() => begin(p), TAP_MS)
   else begin(p)
-  record(p)
 })
 
 canvas.addEventListener("pointermove", e => {
@@ -824,11 +877,18 @@ document.addEventListener("visibilitychange", () => {
     release(null, true)
     dropMic()
     orb.stop()
+    if (lapsed) forget()
+    // Android keeps a hidden page's stream up for a while: closed, home sees no page and pushes.
+    interrupted()
+    clearTimeout(lost)
+    lost = 0
+    clearTimeout(probing)
+    es?.close()
+    es = null
   } else {
     if (ran) unlock()
     orb.start()
-    if (offline || !es) probe()
-    else opened()
+    reconnect()
   }
   wake()
 })
