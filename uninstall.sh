@@ -20,8 +20,12 @@ unlink_if_link "$CONFIG/systemd/user/glitch-mind.service"
 systemctl --user daemon-reload
 
 omarchy plugin disable "$PLUGIN_ID" >/dev/null 2>&1
-unlink_if_link "$CONFIG/omarchy/plugins/$PLUGIN_ID"
-[[ -d $CONFIG/omarchy/plugins/$PLUGIN_ID ]] && echo "    the plugin's folder is this checkout; finish with: omarchy plugin remove $PLUGIN_ID"
+plugin_dir="$CONFIG/omarchy/plugins/$PLUGIN_ID"
+unlink_if_link "$plugin_dir"
+unlink_if_link "$plugin_dir/manifest.json"
+unlink_if_link "$plugin_dir/plugin"
+rmdir "$plugin_dir" 2>/dev/null
+[[ -d $plugin_dir ]] && echo "    the plugin's folder is this checkout; finish with: omarchy plugin remove $PLUGIN_ID"
 omarchy-shell -q shell rescanPlugins >/dev/null 2>&1
 
 hypr="$CONFIG/hypr/hyprland.lua"

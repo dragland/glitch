@@ -193,12 +193,15 @@ if ((with_mind)); then
 fi
 
 step "Linking code into place"
-# `omarchy plugin add` clones the repo to this path. Any other checkout links plugin/ there,
-# never the repo root: `omarchy plugin update` would hard-reset it (AGENTS.md).
+# `omarchy plugin add` clones the repo to this path. Any other checkout gets a folder there
+# holding links to its manifest and plugin/, never a link to the repo root: `omarchy plugin
+# update` would hard-reset it (AGENTS.md).
 plugin_dir="$CONFIG/omarchy/plugins/$PLUGIN_ID"
 if [[ -L $plugin_dir || ! $REPO -ef $plugin_dir ]]; then
-  [[ -e $plugin_dir && ! -L $plugin_dir ]] && die "${plugin_dir/#$HOME/~} is another copy of glitch; run its install.sh, or remove it with: omarchy plugin remove $PLUGIN_ID"
-  link "$REPO/plugin" "$plugin_dir"
+  [[ -d $plugin_dir/.git && ! -L $plugin_dir ]] && die "${plugin_dir/#$HOME/~} is another copy of glitch; run its install.sh, or remove it with: omarchy plugin remove $PLUGIN_ID"
+  [[ -L $plugin_dir ]] && rm "$plugin_dir"
+  link "$REPO/manifest.json" "$plugin_dir/manifest.json"
+  link "$REPO/plugin" "$plugin_dir/plugin"
 fi
 link "$REPO/bin/glitch" "$HOME/.local/bin/glitch"
 link "$REPO/hypr/glitch.lua" "$CONFIG/hypr/glitch.lua"
