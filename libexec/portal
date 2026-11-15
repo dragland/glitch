@@ -125,7 +125,9 @@ HTML page's inline <style> and <script> blocks.
                         for an endpoint outside PUSH_HOSTS, or with no VAPID key
   POST /api/talk        a recording (Content-Type one of AUDIO, up to 50 MiB) -> {outcome}:
                         turn, fresh ("new chat" alone), empty (nothing heard) or error;
-                        415 type, 413 empty or too big, 422 undecodable, 500 transcription failed
+                        415 type, 413 empty or too big, 422 undecodable, 500 transcription failed.
+                        Runs `glitch _heard <ms of audio>` with the transcript on stdin; the
+                        last word it prints is the outcome.
   POST /api/approve     {id, allow: bool} -> {ok}; 409 not pending or allow not a bool;
                         422 allow with cut > 0
   POST /api/cancel      stops the running turn, whichever portal started it -> {ok}
@@ -596,7 +598,6 @@ class Portal:
             self.publish({"type": "turn", "turn": turn})
 
     def glitch(self, *args, said=None, timeout=30):
-        # What was said goes in on stdin: any local account can read a process's arguments.
         env = dict(os.environ, GLITCH_PORTAL="phone")
         return subprocess.run([self.a.glitch, *args], env=env, capture_output=True, text=True,
                               timeout=timeout, input=said or "", check=False)

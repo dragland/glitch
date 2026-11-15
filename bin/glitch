@@ -287,7 +287,7 @@ speech_warm() {
 
 speech_render() {
   [[ -n ${SPEAK_PID:-} ]] || return 0
-  timeout 5 bash -c 'printf "%s" "$1" >"$2"' _ "$1" "$SPEAK_SLOT.fifo" 2>/dev/null
+  printf '%s' "$1" | timeout 5 bash -c 'cat >"$1"' _ "$SPEAK_SLOT.fifo" 2>/dev/null
   timeout 5 tail -s 0.05 --pid="$SPEAK_PID" -f /dev/null 2>/dev/null # -s: the default poll is 1 s
   kill "$SPEAK_PID" 2>/dev/null
   rm -f "$SPEAK_SLOT.fifo"
@@ -770,7 +770,6 @@ heard() {
     echo "$cmd"
     return
   fi
-  # On stdin: any local account can read a process's arguments, and a turn runs for minutes.
   setsid "$0" _turn "$fresh" "$speech" <<<"$text" >/dev/null 2>&1 8>&- &
   if [[ -z $text ]]; then echo fresh; else echo turn; fi
 }
@@ -1054,7 +1053,13 @@ cmd_approve() {
   if [[ $PORTAL == phone ]]; then
     pick=$(phone_approve "$shown" "$ask" "${cut:-1}")
   else
-    pick=$(timeout 60 omarchy-menu-select "glitch wants to · $short" "󰄬	Allow once" "󰅖	Deny" -- --width 760 2>/dev/null) || pick=""
+    # omarchy-menu-select filters typed text on label and subtext and selects the first row
+    # left: as Allow's subtext or above Allow, the request would turn a typed "d" into an
+    # Allow. The request is the agent's, so a tool named like a row must not pass for one.
+    short=${short//[$'\t\n']/ }
+    pick=$(printf '󰄬\tAllow once\n󰅖\tDeny\n󰋼\t%s\t%s\n' "${short%%: *}" "${short#*: }" |
+      timeout 60 omarchy-menu-select "glitch · ${ask%\?}" -- --width 760 2>/dev/null) || pick=""
+    [[ $pick == "Allow once" && $short != "Allow once"* || $pick == Deny ]] || pick=""
     [[ -z $pick ]] && omarchy-menu close >/dev/null 2>&1
     hush
   fi
@@ -1383,12 +1388,17 @@ card_sweep
 case "${1:-}" in
 toggle) shift; cmd_toggle "$@" ;;
 stop) exec 8>"$RT/key.lock"; flock 8; cmd_stop ;;
+# _turn FRESH [SPEECH] and _heard MS take what was said on stdin. _heard prints heard's
+# outcome. Text as an argument, from a caller still running older code, must not pass for
+# an empty turn.
 _turn)
+  [[ $# -le 3 && ${2:-false} =~ ^(true|false)$ ]] || { log "_turn: unexpected arguments"; exit 2; }
   text=$(cat)
   exec </dev/null
   cmd_turn "$text" "${2:-false}" "${3:-}"
   ;;
 _heard)
+  [[ ${2:-0} =~ ^[0-9]+$ ]] || { log "_heard: unexpected arguments"; exit 2; }
   text=$(cat)
   heard "$text" false "$(speech_stats "${2:-0}" "$text")"
   ;;
