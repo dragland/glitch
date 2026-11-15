@@ -1054,7 +1054,11 @@ cmd_approve() {
   if [[ $PORTAL == phone ]]; then
     pick=$(phone_approve "$shown" "$ask" "${cut:-1}")
   else
-    pick=$(timeout 60 omarchy-menu-select "glitch wants to · $short" "󰄬	Allow once" "󰅖	Deny" -- --width 760 2>/dev/null) || pick=""
+    # The rows go in on stdin, the request as Allow's second line: omarchy-menu-select stays
+    # up as long as the menu, and any local account can read its arguments.
+    pick=$(printf '󰄬\tAllow once\t%s\n󰅖\tDeny\n' "${short//[$'\t\n']/ }" |
+      timeout 60 omarchy-menu-select "glitch · $ask" -- --width 760 2>/dev/null) || pick=""
+    pick=${pick%%$'\t'*}
     [[ -z $pick ]] && omarchy-menu close >/dev/null 2>&1
     hush
   fi
