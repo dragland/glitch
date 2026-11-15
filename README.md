@@ -6,6 +6,10 @@ Voice companion for [Omarchy](https://omarchy.org). Tap a key, talk, and an orb 
   <img src="docs/orb.webp" width="360" alt="The orb waking up, saying hello, listening, working and reporting back" />
 </div>
 
+With sound:
+
+https://github.com/user-attachments/assets/cdc3288a-8444-4d4a-a234-3a0bc62211b6
+
 ## How it works
 
 - Tap **Super+D**, talk, tap again
