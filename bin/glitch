@@ -770,7 +770,8 @@ heard() {
     echo "$cmd"
     return
   fi
-  setsid "$0" _turn "$text" "$fresh" "$speech" </dev/null >/dev/null 2>&1 8>&- &
+  # On stdin: any local account can read a process's arguments, and a turn runs for minutes.
+  setsid "$0" _turn "$fresh" "$speech" <<<"$text" >/dev/null 2>&1 8>&- &
   if [[ -z $text ]]; then echo fresh; else echo turn; fi
 }
 
@@ -1382,8 +1383,15 @@ card_sweep
 case "${1:-}" in
 toggle) shift; cmd_toggle "$@" ;;
 stop) exec 8>"$RT/key.lock"; flock 8; cmd_stop ;;
-_turn) cmd_turn "$2" "${3:-false}" "${4:-}" ;;
-_heard) heard "$2" false "$(speech_stats "${3:-0}" "$2")" ;;
+_turn)
+  text=$(cat)
+  exec </dev/null
+  cmd_turn "$text" "${2:-false}" "${3:-}"
+  ;;
+_heard)
+  text=$(cat)
+  heard "$text" false "$(speech_stats "${2:-0}" "$text")"
+  ;;
 _reactions) reactions . ;;
 pair) cmd_pair ;;
 unpair) cmd_unpair ;;
@@ -1396,7 +1404,7 @@ _expire) cmd_expire "${2:-}" ;;
 _approve) cmd_approve ;;
 _reap) cmd_reap ;;
 open) cmd_open ;;
-new) setsid "$0" _turn "" true </dev/null >/dev/null 2>&1 & ;;
+new) setsid "$0" _turn true </dev/null >/dev/null 2>&1 & ;;
 cancel) cmd_cancel ;;
 hush) hush ;;
 say)

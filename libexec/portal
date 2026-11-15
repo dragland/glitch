@@ -595,10 +595,11 @@ class Portal:
                     self.waiting = None
             self.publish({"type": "turn", "turn": turn})
 
-    def glitch(self, *args, timeout=30):
+    def glitch(self, *args, said=None, timeout=30):
+        # What was said goes in on stdin: any local account can read a process's arguments.
         env = dict(os.environ, GLITCH_PORTAL="phone")
         return subprocess.run([self.a.glitch, *args], env=env, capture_output=True, text=True,
-                              timeout=timeout, stdin=subprocess.DEVNULL, check=False)
+                              timeout=timeout, input=said or "", check=False)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -772,7 +773,7 @@ class Handler(BaseHTTPRequestHandler):
         # voxtype prints a header, a blank line, then the text.
         text = " ".join(r.stdout.split("\n\n", 1)[1].split()) if "\n\n" in r.stdout else ""
         self.p.log(f"heard {ms} ms of audio: convert {t1 - t0:.2f}s, transcribe {time.monotonic() - t1:.2f}s")
-        out = self.p.glitch("_heard", text, str(ms)).stdout.split()
+        out = self.p.glitch("_heard", str(ms), said=text).stdout.split()
         self.send_json(200, {"outcome": out[-1] if out else "error"})
 
     def post_approve(self):
