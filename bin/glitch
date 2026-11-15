@@ -1059,6 +1059,7 @@ cmd_approve() {
     short=${short//[$'\t\n']/ }
     pick=$(printf '󰄬\tAllow once\n󰅖\tDeny\n󰋼\t%s\t%s\n' "${short%%: *}" "${short#*: }" |
       timeout 60 omarchy-menu-select "glitch · ${ask%\?}" -- --width 760 2>/dev/null) || pick=""
+    [[ $pick == "Allow once" && $short != "Allow once"* || $pick == Deny ]] || pick=""
     [[ -z $pick ]] && omarchy-menu close >/dev/null 2>&1
     hush
   fi
@@ -1391,7 +1392,7 @@ stop) exec 8>"$RT/key.lock"; flock 8; cmd_stop ;;
 # a process's arguments. _heard prints heard's outcome. A caller from before an update still
 # passes the text first, and must not be taken for an empty turn, which starts a fresh session.
 _turn)
-  [[ ${2:-false} == true || ${2:-false} == false ]] || { log "_turn: unexpected arguments"; exit 2; }
+  [[ $# -le 3 && ${2:-false} =~ ^(true|false)$ ]] || { log "_turn: unexpected arguments"; exit 2; }
   text=$(cat)
   exec </dev/null
   cmd_turn "$text" "${2:-false}" "${3:-}"
