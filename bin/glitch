@@ -36,13 +36,15 @@ CARD="$RT/card"
 . "$GLITCH_HOME/config/glitch.conf"
 # shellcheck source=/dev/null
 [[ -f $USER_CONF/glitch.conf ]] && . "$USER_CONF/glitch.conf"
-export GLITCH_BEEP_VOLUME="${BEEP_VOLUME:-2.0}" MIND JEV_MODEL OPENAI_DECIDE_MODEL GLITCH_MIND_PORT="$MIND_PORT"
+export GLITCH_BEEP_VOLUME="${BEEP_VOLUME:-2.0}" MIND JEV_MODEL OPENAI_DECIDE_MODEL GLITCH_MIND_SOCK="$RT/mind.sock"
 
 case "${1:-}" in
 _mind)
-  # llama-server splits -c across the -np slots: 1024 each, for ~400-token prompts. Any web
-  # page can reach localhost, so the model needs the key. A CPU build ignores -ngl.
-  exec "$DATA/llama/llama-server" -m "$DATA/models/Qwen3-1.7B-Q4_K_M.gguf" -ngl 99 --host 127.0.0.1 --port "$MIND_PORT" \
+  # llama-server splits -c across the -np slots: 1024 each, for ~400-token prompts. It takes a
+  # --host ending in .sock as a Unix socket, and won't bind over the socket a crashed run left.
+  # A CPU build ignores -ngl.
+  rm -f "$RT/mind.sock"
+  exec "$DATA/llama/llama-server" -m "$DATA/models/Qwen3-1.7B-Q4_K_M.gguf" -ngl 99 --host "$RT/mind.sock" \
     -c 2048 -np 2 --no-slots --no-webui --api-key-file "$DATA/mind.key"
   ;;
 _remote)

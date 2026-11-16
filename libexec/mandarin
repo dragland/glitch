@@ -11,13 +11,14 @@ when the sentence is under MIN_EN characters, the model is away or slow, or its
 answer is not such a line. Errors go to stderr.
 """
 
+import http.client
 import json
 import os
 import re
+import socket
 import sys
-import urllib.request
 
-URL = f"http://127.0.0.1:{os.environ.get('GLITCH_MIND_PORT') or 8765}/v1/chat/completions"
+MIND_SOCK = os.environ.get("GLITCH_MIND_SOCK", "")  # bin/glitch sets it
 KEY = os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "glitch", "mind.key")
 SYSTEM = ("You translate an AI assistant's working thoughts into Mandarin for a beginner learner. "
           "Reply with one short, natural spoken sentence in Simplified Chinese, 20 characters at most, "
@@ -30,6 +31,26 @@ CODE = re.compile(r"`[^`]+`|\b\w+_\w+\b(\(\))?|\b\w+\(\)|\b[a-z]+[A-Z]\w*\b")
 LINE = re.compile(r"[一-鿿0-9.%，。！？、；：…—\s]+")
 TITLE = re.compile(r"^\s*\*\*[^*\n]*\*\*\s*")
 END = re.compile(r"[.!?]+[\"')\]]*(?=\s+[A-Z\"'(\[]|\s*$)")
+
+
+class _Mind(http.client.HTTPConnection):
+    def connect(self):
+        self.sock = socket.socket(socket.AF_UNIX)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect(MIND_SOCK)
+
+
+def mind_post(path, body, key, timeout):
+    conn = _Mind("mind", timeout=timeout)
+    try:
+        conn.request("POST", path, json.dumps(body).encode(),
+                     {"Content-Type": "application/json", "Authorization": f"Bearer {key}"})
+        r = conn.getresponse()
+        if r.status != 200:
+            raise OSError(f"glitch-mind: HTTP {r.status}")
+        return json.load(r)
+    finally:
+        conn.close()
 
 
 def split(thought):
@@ -48,10 +69,7 @@ def translate(en):
             "chat_template_kwargs": {"enable_thinking": False}, "temperature": 0.2, "max_tokens": 60}
     with open(KEY) as f:
         key = f.read().strip()
-    req = urllib.request.Request(URL, json.dumps(body).encode(),
-                                 {"Content-Type": "application/json", "Authorization": f"Bearer {key}"})
-    with urllib.request.urlopen(req, timeout=6) as r:
-        out = json.load(r)["choices"][0]["message"]["content"].strip().splitlines()
+    out = mind_post("/v1/chat/completions", body, key, 6)["choices"][0]["message"]["content"].strip().splitlines()
     return out[0].strip(" \"'“”「」") if out else ""
 
 
@@ -70,6 +88,6 @@ def main():
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except (OSError, ValueError, KeyError, IndexError) as e:
+    except (OSError, http.client.HTTPException, ValueError, KeyError, IndexError) as e:
         print(f"mandarin: {e}", file=sys.stderr)
         sys.exit(0)
