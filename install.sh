@@ -261,9 +261,9 @@ if ((with_mind)); then
   systemctl --user daemon-reload
   systemctl --user enable glitch-mind.service >/dev/null 2>&1 || die "couldn't enable glitch-mind (systemctl --user status glitch-mind)"
   systemctl --user restart glitch-mind.service
-  mind_port=$(conf MIND_PORT)
-  for _ in $(seq 1 30); do curl -fs "localhost:$mind_port/health" >/dev/null 2>&1 && break; sleep 1; done
-  curl -fs "localhost:$mind_port/health" >/dev/null 2>&1 && ok "glitch-mind is up on :$mind_port" || echo "    warning: glitch-mind isn't answering yet (journalctl --user -u glitch-mind)"
+  mind_sock="${XDG_RUNTIME_DIR:-/run/user/$UID}/glitch/mind.sock"
+  for _ in $(seq 1 30); do curl -fs --unix-socket "$mind_sock" http://mind/health >/dev/null 2>&1 && break; sleep 1; done
+  curl -fs --unix-socket "$mind_sock" http://mind/health >/dev/null 2>&1 && ok "glitch-mind is up" || echo "    warning: glitch-mind isn't answering yet (journalctl --user -u glitch-mind)"
 fi
 
 step "Remote control (sessions from the Claude app)"

@@ -36,13 +36,15 @@ CARD="$RT/card"
 . "$GLITCH_HOME/config/glitch.conf"
 # shellcheck source=/dev/null
 [[ -f $USER_CONF/glitch.conf ]] && . "$USER_CONF/glitch.conf"
-export GLITCH_BEEP_VOLUME="${BEEP_VOLUME:-2.0}" MIND JEV_MODEL OPENAI_DECIDE_MODEL GLITCH_MIND_PORT="$MIND_PORT"
+export GLITCH_BEEP_VOLUME="${BEEP_VOLUME:-2.0}" MIND JEV_MODEL OPENAI_DECIDE_MODEL GLITCH_MIND_SOCK="$RT/mind.sock"
 
 case "${1:-}" in
 _mind)
-  # llama-server splits -c across the -np slots: 1024 each, for ~400-token prompts. Any web
-  # page can reach localhost, so the model needs the key. A CPU build ignores -ngl.
-  exec "$DATA/llama/llama-server" -m "$DATA/models/Qwen3-1.7B-Q4_K_M.gguf" -ngl 99 --host 127.0.0.1 --port "$MIND_PORT" \
+  # llama-server splits -c across the -np slots: 1024 each, for ~400-token prompts. It takes a
+  # --host ending in .sock as a Unix socket, and won't bind over the socket a crashed run left.
+  # A CPU build ignores -ngl.
+  rm -f "$RT/mind.sock"
+  exec "$DATA/llama/llama-server" -m "$DATA/models/Qwen3-1.7B-Q4_K_M.gguf" -ngl 99 --host "$RT/mind.sock" \
     -c 2048 -np 2 --no-slots --no-webui --api-key-file "$DATA/mind.key"
   ;;
 _remote)
@@ -1025,6 +1027,30 @@ def laid($n):
     and ($i.command | vis == . and test("\\S") and (test("[\n\t]|\\s\\s|^\\s|\\s$") | not)))
 '
 
+# The menu elides a row past its width and has no scrollbar. DESK_COLS columns must fit
+# --width 760 in the menu font. A space shows as ·. Any other character outside the measured
+# narrow and wide sets shows as \u{HEX}: a fallback font can draw one far wider, right-to-left
+# letters reorder a row, and a tab splits a menu option into glyph, label and subtext.
+DESK_COLS=64
+# shellcheck disable=SC2016 # jq, not bash
+DESK_ROWS_JQ='
+def narrow: (. >= 33 and . <= 126) or (. >= 161 and . <= 383 and . != 183) or (. >= 913 and . <= 969)
+  or (. >= 1025 and . <= 1119) or (. >= 8208 and . <= 8212) or (. >= 8214 and . <= 8228) or . == 8230
+  or (. >= 8592 and . <= 8601) or (. >= 9472 and . <= 9631);
+def wide: . as $c | ((. >= 12289 and . <= 12329) or (. >= 12336 and . <= 12350) or (. >= 12353 and . <= 12440)
+  or (. >= 12443 and . <= 12543) or (. >= 13312 and . <= 19903) or (. >= 19968 and . <= 40959)
+  or (. >= 44032 and . <= 55203) or (. >= 65281 and . <= 65376) or (. >= 127744 and . <= 128591)
+  or (. >= 128640 and . <= 128767) or (. >= 129280 and . <= 129535))
+  and ([128364, 128389, 128408, 128409, 128410, 128411, 128412, 128413, 128435, 128474, 128475, 128491, 128494]
+    | index([$c]) == null);
+def cell: if . == 32 then {s: [183], w: 1} elif narrow then {s: [.], w: 1} elif wide then {s: [.], w: 2}
+  else "\\u{\(hex)}" | {s: explode, w: length} end;
+def wrap($w): reduce (explode[] | cell) as $c ({rows: [], cur: [], n: 0};
+  if .n + $c.w > $w and .n > 0 then .rows += [.cur] | .cur = $c.s | .n = $c.w
+  else .cur += $c.s | .n += $c.w end) | .rows + [.cur] | map(implode);
+.label | split("\n") | map(wrap($cols - 2) | .[0] |= "  " + . | .[1:] |= map("» " + .)) | add | .[]
+'
+
 cmd_approve() {
   local in tool short cut shown ask pick before
   in=$(cat)
@@ -1037,7 +1063,23 @@ cmd_approve() {
   *) ask="Okay to do that?" ;;
   esac
   log "approve? $short"
-  if [[ $PORTAL == desk && (-z $tool || $tool == null || -z $short) ]]; then
+  local rows="" why=""
+  if [[ $PORTAL == desk ]]; then
+    if [[ -z $tool || $tool == null ]]; then
+      why=nothing
+    elif [[ $cut != 0 ]]; then
+      why=long
+    else
+      rows=$(jq -r --argjson cols "$DESK_COLS" "$JQ_DEFS$DESK_ROWS_JQ" <<<"$shown" 2>>"$RT/glitch.log")
+      [[ -n $rows ]] || why=nothing
+    fi
+  fi
+  if [[ $why == long ]]; then
+    log "approve: too long to show, denied"
+    jq -cn '{hookSpecificOutput: {hookEventName: "PermissionRequest", decision: {behavior: "deny",
+      message: "It was too long to show the user in full, so it was denied. Don\u0027t retry it as is; shorten it or split it into smaller steps."}}}'
+    return 0
+  elif [[ $why == nothing ]]; then
     log "approve: nothing to show, denied"
     jq -cn '{hookSpecificOutput: {hookEventName: "PermissionRequest", decision: {behavior: "deny",
       message: "It couldn\u0027t be shown to the user, so it was denied. Don\u0027t retry it; say what you needed, starting the SAY line with Need you."}}}'
@@ -1053,13 +1095,14 @@ cmd_approve() {
   if [[ $PORTAL == phone ]]; then
     pick=$(phone_approve "$shown" "$ask" "${cut:-1}")
   else
-    # omarchy-menu-select filters typed text on label and subtext and selects the first row
-    # left: as Allow's subtext or above Allow, the request would turn a typed "d" into an
-    # Allow. The request is the agent's, so a tool named like a row must not pass for one.
-    short=${short//[$'\t\n']/ }
-    pick=$(printf '󰄬\tAllow once\n󰅖\tDeny\n󰋼\t%s\t%s\n' "${short%%: *}" "${short#*: }" |
-      timeout 60 omarchy-menu-select "glitch · ${ask%\?}" -- --width 760 2>/dev/null) || pick=""
-    [[ $pick == "Allow once" && $short != "Allow once"* || $pick == Deny ]] || pick=""
+    # omarchy-menu-select starts the cursor on the first row and returns a picked row's label.
+    # A request row starts with its gutter and has no tab, so it can't return Deny or Allow
+    # once; nothing else guards pick.
+    local n
+    n=$(grep -vc '^» ' <<<"$rows")
+    pick=$({ printf '󰅖\tDeny\n'; printf '%s\n' "$rows"; printf '󰄬\tAllow once\n'; } |
+      timeout 60 omarchy-menu-select "glitch · ${ask%\?} · $n line$( ((n == 1)) || echo s)" -- --width 760 2>/dev/null) || pick=""
+    [[ $pick == "Allow once" || $pick == Deny ]] || pick=""
     [[ -z $pick ]] && omarchy-menu close >/dev/null 2>&1
     hush
   fi

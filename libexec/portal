@@ -61,7 +61,7 @@ Events. Each carries its "type". bin/glitch writes all but `turn` and `hello`.
              (Bash's description is the one field left out). Any other tool or input gets
              "<Tool>:" and every field as key: value lines.
            short: "<Tool>: " and up to 110 characters of one field's first non-empty line
-             (the desk's menu title, the notification's text); "" when the input is
+             (the notification's text and the phone's state detail); "" when the input is
              neither an object nor null.
            In label and short, bin/glitch's vis writes each character that shows as nothing
              or as a plain space as \\u{HEX}.

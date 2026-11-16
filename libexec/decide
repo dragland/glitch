@@ -20,16 +20,18 @@ passes, or the agent's MOOD is clear (that look is the table's), so the caller
 falls back to reactions.json; errors go to stderr.
 """
 
+import http.client
 import json
 import math
 import os
+import socket
 import sys
 import time
 import traceback
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, wait
 
-LOCAL_URL = f"http://127.0.0.1:{os.environ.get('GLITCH_MIND_PORT') or 8765}/completion"
+MIND_SOCK = os.environ.get("GLITCH_MIND_SOCK", "")  # bin/glitch sets it
 LOCAL_KEY = os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "glitch", "mind.key")
 SLOTS = 2  # glitch-mind runs -np 2
 SYSTEM = ("You choose how an animated companion orb expresses an AI "
@@ -148,6 +150,26 @@ def post(url, body, key, timeout):
         return json.load(r)
 
 
+class _Mind(http.client.HTTPConnection):
+    def connect(self):
+        self.sock = socket.socket(socket.AF_UNIX)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect(MIND_SOCK)
+
+
+def mind_post(path, body, key, timeout):
+    conn = _Mind("mind", timeout=timeout)
+    try:
+        conn.request("POST", path, json.dumps(body).encode(),
+                     {"Content-Type": "application/json", "Authorization": f"Bearer {key}"})
+        r = conn.getresponse()
+        if r.status != 200:
+            raise OSError(f"glitch-mind: HTTP {r.status}")
+        return json.load(r)
+    finally:
+        conn.close()
+
+
 # Each backend: (context, {name: (question, [(value, description)])}, deadline)
 # -> {name: {value: probability}}. Raise on failure.
 
@@ -159,7 +181,7 @@ def ask_local(context, questions, deadline):
         prompt = (f"<|im_start|>system\n{SYSTEM}<|im_end|>\n"
                   f"<|im_start|>user\n{context}\n\n{question}\n{opts}\nReply with one letter.<|im_end|>\n"
                   "<|im_start|>assistant\n<think>\n\n</think>\n\n")
-        out = post(LOCAL_URL, {"prompt": prompt, "n_predict": 1, "n_probs": 12, "temperature": 0, "cache_prompt": True},
+        out = mind_post("/completion", {"prompt": prompt, "n_predict": 1, "n_probs": 12, "temperature": 0, "cache_prompt": True},
                    key, max(0.1, deadline - time.monotonic()))
         probs = {}
         for t in out["completion_probabilities"][0]["top_logprobs"]:
@@ -226,8 +248,8 @@ def main():
             opts = [o for o in opts if o[0] not in WORKING_EXCLUDE.get(name, ())]
         questions[name] = (q, opts)
 
-    # Run the backend under one overall deadline (a urllib timeout is per
-    # socket operation, not per call).
+    # Run the backend under one overall deadline (a socket timeout is per
+    # operation, not per call).
     pool = ThreadPoolExecutor(max_workers=1)
     future = pool.submit(backend, context, questions, deadline)
     done, _ = wait([future], timeout=max(0, deadline - time.monotonic()) + 0.2)
